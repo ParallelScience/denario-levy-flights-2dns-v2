@@ -1,0 +1,4 @@
+**Title:** Eddy-Lifetime Dependence of Lévy Flights Modulated by Spectral Condensation in 2D Turbulence
+
+**Description:** This study examines how the Lévy index α is influenced by eddy lifetimes at different wavelet scales, and how this relationship is modulated by the spectral condensation state. Wavelet decomposition of `velocity_snapshots.npy` yields wavelet coefficients used to reconstruct filtered velocity fields, enabling calculation of eddy lifetimes T_eddy(j) at each scale. Time-resolved Lévy indices α(t) are computed from `tracer_positions.npy` within overlapping windows. The relationship between α and T_eddy is assessed by fitting α(j) = f(T_eddy(j)) at different stages of spectral condensation, as characterized by `k_peak(t)` from `diagnostics.npy`. The hypothesis is that the relationship between α and T_eddy changes as `k_peak(t)` shifts towards lower wavenumbers.
+\
