@@ -1,314 +1,441 @@
 **Code Explanation:**
 
-This script performs a non-stationarity analysis on tracer data from a 2D turbulence simulation. It loads simulation parameters, tracer positions, velocities, times, and diagnostic data. The core of the analysis involves iterating through overlapping temporal windows of a fixed width (8 times the initial large-eddy turnover time, `T_L`) and step size (2 * `T_L`).
+The Python script implements a GPU-accelerated 2D Navier-Stokes solver to simulate decaying turbulence and the advection of passive tracers. The simulation is designed to study Lévy flights and non-stationary statistics in a turbulent flow undergoing an inverse energy cascade.
 
-For each window containing a sufficient number of snapshots (at least 50), the script calculates several key statistical metrics:
-1.  **Lévy Stability Index (α):** This parameter characterizes the tails of the tracer displacement probability distribution. It is estimated using two methods for cross-validation:
-    *   The **McCulloch quantile method**, which uses a ratio of sample quantiles to look up α from a pre-computed table.
-    *   The **Hill estimator**, a classic method for tail index estimation based on the largest observed displacements.
-2.  **Anomalous Diffusion Exponent (γ):** Calculated by fitting a power law to the Mean Squared Displacement (MSD) of the tracers.
-3.  **VACF Decay Exponent (ν):** Calculated by fitting an algebraic decay model to the Velocity Autocorrelation Function (VACF).
-4.  **Flow Diagnostics:** The average peak wavenumber (`k_peak`) and inter-vortex distance (`d_vv`) are computed from the diagnostics data within the window.
+The core of the simulation is the `NavierStokes2DSolver` class, which encapsulates the entire process:
 
-The script prints a formatted table of these calculated metrics for each valid time window. Finally, it aggregates all the computed time series (`α(t)`, `γ(t)`, `ν(t)`, `k_peak(t)`, `d_vv(t)`) and saves them into a single compressed NumPy file (`.npz`) for use in subsequent analysis steps. The code is designed to handle cases where the input data is too short to form any valid windows, in which case it will issue a warning and save an empty data file.
+1.  **Initialization**: The solver is initialized with physical and numerical parameters such as grid resolution (1024x1024), hyperviscosity, and forcing parameters. It sets up the computational grid and pre-computes spectral operators (wavenumbers, de-aliasing mask, dissipation operator) on a CUDA-enabled GPU using PyTorch for high performance.
+
+2.  **Pseudo-Spectral Method**: The vorticity equation is solved in Fourier space. The nonlinear advection term is computed using a pseudo-spectral approach, where the product is taken in real space and derivatives are computed in Fourier space. A 2/3 de-aliasing rule is applied to prevent aliasing errors.
+
+3.  **Time Integration**: A fourth-order Runge-Kutta (RK4) scheme with an adaptive timestep is used for time integration. The timestep `dt` is dynamically adjusted based on the maximum velocity in the domain to satisfy a Courant-Friedrichs-Lewy (CFL) condition, ensuring numerical stability.
+
+4.  **Tracer Advection**: 5000 passive tracers are advected within the flow. Their velocities are determined by bilinearly interpolating the Eulerian velocity field at their respective positions. The tracer positions are updated concurrently with the fluid vorticity within the same RK4 integration scheme to maintain accuracy.
+
+5.  **Simulation Phases**:
+    *   **Spinup**: The simulation first runs for a fixed duration (`T_spinup_fixed = 60.0`) to allow the turbulence to develop and reach a statistically steady state, characterized by a developed inverse energy cascade.
+    *   **Production**: After spinup, the main production run begins. Its duration is set to 50 times the large-eddy turnover time (`T_L`) measured at the end of the spinup phase. Tracers are seeded at the start of this phase.
+
+6.  **Data Snapshotting**: During the production run, data is saved at regular intervals:
+    *   Tracer positions and velocities are saved frequently (`dt_snap = 0.05`).
+    *   Eulerian velocity and vorticity fields are saved less frequently (`dt_vel = 2.0`) and are coarsened from 1024x1024 to 256x256 to manage file sizes.
+    *   Various diagnostic quantities (e.g., total energy, RMS velocity, peak wavenumber of the energy spectrum) are computed and saved at every tracer snapshot.
+
+7.  **Output**: At the end of the simulation, all collected data is saved to disk in the specified absolute path (`/home/node/work/projects/levy_flights_2dns_v2/data/`). This includes tracer trajectories, Eulerian fields, time arrays, energy spectra, and a JSON file containing all simulation parameters. The script is designed to be a single, executable file that performs the entire simulation from start to finish.
+
+**Modifications:**
+
+The previous execution failed with a `RuntimeError` due to a tensor shape mismatch during the calculation of the azimuthally averaged energy spectrum. The `torch.bincount` function produced a tensor for the summed energy (`E_k_sum`) whose length was determined by the maximum wavenumber magnitude present in the spectral grid (approx. 724), while the normalization tensor (`k_counts_no_zero`) was sliced to the intended maximum bin index (`k_bins_max = 512`).
+
+This has been fixed by explicitly masking the spectral data to only include wavenumbers up to `k_bins_max`.
+1.  In `_setup_operators`, a boolean mask (`valid_k_mask_flat`) is pre-computed to identify all spectral modes with a wavenumber magnitude less than `k_bins_max`. The wavenumber indices used for binning (`k_bins_indices_flat_valid`) are filtered with this mask.
+2.  In `_compute_diagnostics`, this same mask is applied to the flattened energy data (`energy_hat_flat`) before it is passed to `torch.bincount`.
+This ensures that both the binned energy sum and the normalization counts are computed using the same set of valid wavenumbers, resulting in tensors of a consistent, correct length (`k_bins_max`), which resolves the shape mismatch error.
 
 **Python Code:**
+
 ```python
-import json
-import os
-import sys
+import torch
 import numpy as np
-from scipy.stats import linregress
+import os
+import json
+import time
 
-MCCULLOCH_NU_ALPHA = np.array([
-    2.439, 2.483, 2.539, 2.615, 2.720, 2.879, 3.132, 3.575, 4.011, 4.590,
-    5.185, 6.220, 7.573, 9.815, 12.89, 18.61, 29.03, 54.59, 105.9, 254.1
-])
-MCCULLOCH_ALPHA = np.array([
-    2.0, 1.9, 1.8, 1.7, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1,
-    1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1
-])
-
-def load_required_data(base_path):
+class NavierStokes2DSolver:
     """
-    Loads the necessary data files for non-stationarity analysis.
+    A GPU-accelerated 2D Navier-Stokes solver using the pseudo-spectral method.
 
-    Args:
-        base_path (str): The absolute path to the data directory.
+    This class simulates the evolution of a 2D turbulent flow and the advection
+    of passive tracers within it. The simulation is performed on a doubly-periodic
+    square domain.
 
-    Returns:
-        tuple: A tuple containing sim_params, tracer_positions, tracer_velocities,
-               tracer_times, and diagnostics.
+    Key features:
+    - Pseudo-spectral method for spatial derivatives.
+    - RK4 for time integration with an adaptive timestep (CFL-based).
+    - Hyperviscosity for small-scale dissipation.
+    - Stochastic white-in-time forcing in a specified wavenumber shell.
+    - Advection of passive Lagrangian tracers using bilinear interpolation.
+    - Two-phase simulation: spinup followed by a production run.
+    - Regular snapshotting of tracer and Eulerian field data.
+    - All computations are performed on a CUDA-enabled GPU using PyTorch.
     """
-    print("--- Loading Data for Step 2 ---")
-    try:
-        with open(os.path.join(base_path, 'sim_params.json'), 'r') as f:
-            sim_params = json.load(f)
-        tracer_positions = np.load(os.path.join(base_path, 'tracer_positions.npy'))
-        tracer_velocities = np.load(os.path.join(base_path, 'tracer_velocities.npy'))
-        tracer_times = np.load(os.path.join(base_path, 'tracer_times.npy'))
-        diagnostics = np.load(os.path.join(base_path, 'diagnostics.npy'))
-    except FileNotFoundError as e:
-        print("Error: A required data file was not found.")
-        print(e)
-        sys.exit(1)
-    print("Data loading complete.")
-    return sim_params, tracer_positions, tracer_velocities, tracer_times, diagnostics
 
-def calculate_displacements(positions, lag, domain_size=2*np.pi):
-    """
-    Calculates tracer displacements |r(t+lag) - r(t)| with periodic boundaries.
+    def __init__(self, params):
+        """
+        Initializes the solver with specified parameters.
 
-    Args:
-        positions (np.ndarray): Tracer positions array of shape (n_times, n_tracers, 2).
-        lag (int): The time lag in number of snapshot steps.
-        domain_size (float): The size of the periodic domain.
+        Args:
+            params (dict): A dictionary containing all simulation parameters.
+        """
+        self.params = params
+        self.N = params['N']
+        self.device = torch.device(params['device'])
+        self.output_path = params['output_path']
+        os.makedirs(self.output_path, exist_ok=True)
 
-    Returns:
-        np.ndarray: A flattened array of displacement magnitudes.
-    """
-    delta_r = positions[lag:] - positions[:-lag]
-    delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size
-    displacements = np.sqrt(np.sum(delta_r**2, axis=2))
-    return displacements.flatten()
+        self.L = 2 * np.pi
+        self.dx = self.L / self.N
+        self.CFL = params['CFL']
+        self.nu_h = params['nu_h']
+        self.p = params['p']
+        self.epsilon_inj = params['epsilon_inj']
+        self.k_force_min = params['k_force_min']
+        self.k_force_max = params['k_force_max']
+        self.N_tracers = params['N_tracers']
+        self.dt_snap = params['dt_snap']
+        self.dt_vel = params['dt_vel']
+        self.T_spinup_fixed = params['T_spinup_fixed']
+        self.coarsening_factor = self.N // params['N_coarse']
 
-def estimate_alpha_mcculloch(displacements):
-    """
-    Estimates the Levy index alpha using the McCulloch quantile method.
+        self._setup_grid_and_wavenumbers()
+        self._setup_operators()
 
-    Args:
-        displacements (np.ndarray): Array of displacement magnitudes.
+        self.t = 0.0
+        self.omega_hat = self._initialize_field()
+        self.tracer_pos = None
 
-    Returns:
-        float: The estimated alpha value. Returns np.nan if calculation fails.
-    """
-    if len(displacements) < 10:
-        return np.nan
-    q = np.percentile(displacements, [5, 25, 75, 95])
-    q5, q25, q75, q95 = q[0], q[1], q[2], q[3]
-    
-    denominator = q75 - q25
-    if denominator <= 1e-9:
-        return np.nan
+    def _setup_grid_and_wavenumbers(self):
+        """Sets up the computational grid and wavenumbers in spectral space."""
+        k = torch.fft.fftfreq(self.N, d=self.dx) * self.L
+        k_rfft = torch.fft.rfftfreq(self.N, d=self.dx) * self.L
         
-    nu_alpha = (q95 - q5) / denominator
-    alpha = np.interp(nu_alpha, MCCULLOCH_NU_ALPHA, MCCULLOCH_ALPHA)
-    return alpha
-
-def estimate_alpha_hill(displacements):
-    """
-    Estimates the Levy index alpha using the Hill estimator.
-
-    Args:
-        displacements (np.ndarray): Array of displacement magnitudes.
-
-    Returns:
-        float: The estimated alpha value. Returns np.nan if calculation fails.
-    """
-    if len(displacements) < 20:
-        return np.nan
+        kx_grid, ky_grid = torch.meshgrid(k, k_rfft, indexing='ij')
+        self.k_squared = (kx_grid**2 + ky_grid**2).to(self.device)
+        self.k_magnitude = torch.sqrt(self.k_squared)
         
-    k = max(10, int(0.05 * len(displacements)))
-    
-    sorted_displacements = np.sort(displacements)[::-1]
-    top_k_displacements = sorted_displacements[:k]
-    
-    x_k = top_k_displacements[-1]
-    
-    if x_k <= 1e-9:
-        return np.nan
+        self.kx_grid_full = kx_grid.to(self.device)
+        self.ky_grid_full = ky_grid.to(self.device)
+
+        self.k_squared_no_zero = self.k_squared.clone()
+        self.k_squared_no_zero[0, 0] = 1.0
+
+    def _setup_operators(self):
+        """Pre-computes spectral operators for dissipation, de-aliasing, and forcing."""
+        self.dissipation_op = -self.nu_h * (self.k_squared**self.p)
+
+        k_max_dealias = self.N / 3.0
+        self.dealias_mask = (torch.abs(self.kx_grid_full) < k_max_dealias) & \
+                            (torch.abs(self.ky_grid_full) < k_max_dealias)
+        self.dealias_mask = self.dealias_mask.to(self.device)
+
+        self.force_mask = (self.k_magnitude >= self.k_force_min) & \
+                          (self.k_magnitude <= self.k_force_max)
+        self.force_mask = self.force_mask.to(self.device)
+        self.num_force_modes = torch.sum(self.force_mask)
+        if self.num_force_modes > 0:
+            self.force_amplitude = torch.sqrt(2 * self.epsilon_inj * self.num_force_modes / (self.L**2))
+        else:
+            self.force_amplitude = 0
+
+        k_bins_indices = torch.floor(self.k_magnitude).long()
+        self.k_bins_max = self.N // 2
+        self.k_values = torch.arange(self.k_bins_max, device=self.device)
         
-    log_ratios = np.log(top_k_displacements / x_k)
-    mean_log_ratio = np.mean(log_ratios)
-    
-    if mean_log_ratio <= 1e-9:
-        return np.nan
+        valid_k_mask = k_bins_indices < self.k_bins_max
+        self.valid_k_mask_flat = valid_k_mask.flatten()
+        self.k_bins_indices_flat_valid = k_bins_indices.flatten()[self.valid_k_mask_flat]
+
+        k_counts = torch.bincount(self.k_bins_indices_flat_valid, minlength=self.k_bins_max)
+        self.k_counts_no_zero = torch.where(k_counts > 0, k_counts, 1).to(self.device)
+
+    def _initialize_field(self):
+        """Initializes the vorticity field with small random noise."""
+        omega = torch.randn((self.N, self.N), device=self.device) * 1e-3
+        return torch.fft.rfft2(omega)
+
+    def _compute_velocity_hat(self, omega_hat):
+        """Computes velocity components in spectral space from vorticity."""
+        psi_hat = -omega_hat / self.k_squared_no_zero
+        psi_hat[0, 0] = 0.0
+        u_hat = 1j * self.ky_grid_full * psi_hat
+        v_hat = -1j * self.kx_grid_full * psi_hat
+        return u_hat, v_hat
+
+    def _compute_advection_hat(self, omega_hat, u_hat, v_hat):
+        """Computes the advection term in spectral space."""
+        omega = torch.fft.irfft2(omega_hat, s=(self.N, self.N))
+        u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+        v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
         
-    alpha = 1.0 / mean_log_ratio
-    return alpha
-
-def estimate_gamma_msd(positions, dt_snap, max_lag_frac=0.25):
-    """
-    Estimates the anomalous diffusion exponent gamma from the MSD.
-
-    Args:
-        positions (np.ndarray): Tracer positions for the window.
-        dt_snap (float): Time step between snapshots.
-        max_lag_frac (float): Maximum lag to use for fitting, as a fraction of window length.
-
-    Returns:
-        float: The estimated gamma value. Returns np.nan if fit fails.
-    """
-    n_times = positions.shape[0]
-    max_lag = max(5, int(n_times * max_lag_frac))
-    if n_times <= max_lag:
-        return np.nan
-
-    lags = np.arange(1, max_lag + 1)
-    msd = np.zeros(len(lags))
-    domain_size = 2 * np.pi
-
-    for i, lag in enumerate(lags):
-        delta_r = positions[lag:] - positions[:-lag]
-        delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size
-        sq_disp = np.sum(delta_r**2, axis=2)
-        msd[i] = np.mean(sq_disp)
-
-    tau = lags * dt_snap
-    
-    valid_indices = msd > 1e-9
-    if np.sum(valid_indices) < 2:
-        return np.nan
-
-    log_tau = np.log(tau[valid_indices])
-    log_msd = np.log(msd[valid_indices])
-    
-    slope, _, _, _, _ = linregress(log_tau, log_msd)
-    return slope
-
-def estimate_nu_vacf(velocities, dt_snap, max_lag_frac=0.25):
-    """
-    Estimates the VACF decay exponent nu.
-
-    Args:
-        velocities (np.ndarray): Tracer velocities for the window.
-        dt_snap (float): Time step between snapshots.
-        max_lag_frac (float): Maximum lag to use for fitting, as a fraction of window length.
-
-    Returns:
-        float: The estimated nu value. Returns np.nan if fit fails.
-    """
-    n_times = velocities.shape[0]
-    max_lag = max(5, int(n_times * max_lag_frac))
-    if n_times <= max_lag:
-        return np.nan
-
-    lags = np.arange(1, max_lag + 1)
-    vacf = np.zeros(len(lags))
-    v_sq_mean = np.mean(np.sum(velocities**2, axis=2))
-    if v_sq_mean < 1e-9:
-        return np.nan
-
-    for i, lag in enumerate(lags):
-        dot_prod = np.sum(velocities[:-lag] * velocities[lag:], axis=2)
-        vacf[i] = np.mean(dot_prod) / v_sq_mean
-
-    tau = lags * dt_snap
-    
-    valid_indices = (vacf > 1e-9) & (vacf < 0.95)
-    if np.sum(valid_indices) < 2:
-        return np.nan
-
-    log_tau = np.log(tau[valid_indices])
-    log_vacf = np.log(vacf[valid_indices])
-    
-    slope, _, _, _, _ = linregress(log_tau, log_vacf)
-    return -slope
-
-def analyze_non_stationarity():
-    """
-    Main function to perform the non-stationarity analysis.
-    """
-    base_path = '/home/node/work/projects/levy_flights_2dns_v2/data/'
-    params, positions, velocities, times, diagnostics = load_required_data(base_path)
-
-    t_l_initial = params.get('T_L_at_start_of_production', 1.0)
-    dt_snap = params.get('dt_snap', 0.05)
-    
-    window_width_time = 8 * t_l_initial
-    window_step_time = 2 * t_l_initial
-
-    print("\n--- Non-Stationarity Analysis Setup ---")
-    print("Initial T_L: " + str(t_l_initial))
-    print("Window width (W = 8*T_L): " + str(window_width_time))
-    print("Window step (dW = 2*T_L): " + str(window_step_time))
-
-    start_times = np.arange(times[0], times[-1] - window_width_time, window_step_time)
-    
-    results = []
-
-    print("\n--- Processing Time Windows ---")
-    header_str = "{:>15s} | {:>12s} | {:>12s} | {:>8s} | {:>8s} | {:>8s} | {:>8s}"
-    header = header_str.format(
-        "Win Center (t)", "alpha_McC", "alpha_Hill", "gamma", "nu", "k_peak", "d_vv"
-    )
-    print(header)
-    print("-" * len(header))
-
-    for t_start in start_times:
-        t_end = t_start + window_width_time
+        u_omega = torch.fft.rfft2(u * omega)
+        v_omega = torch.fft.rfft2(v * omega)
         
-        win_indices = np.where((times >= t_start) & (times < t_end))[0]
+        advection_hat = -1j * self.kx_grid_full * u_omega - 1j * self.ky_grid_full * v_omega
+        return advection_hat * self.dealias_mask
+
+    def _compute_forcing_hat(self, dt):
+        """Generates the stochastic forcing term in spectral space."""
+        if self.force_amplitude == 0:
+            return torch.zeros_like(self.omega_hat)
         
-        if len(win_indices) < 50:
-            msg = "Warning: Skipping window at t=" + str(t_start) + " due to insufficient snapshots (" + str(len(win_indices)) + " < 50)."
-            print(msg)
-            continue
+        rand_phases = torch.exp(2j * np.pi * torch.rand(self.omega_hat.shape, device=self.device))
+        forcing_hat = self.force_amplitude * rand_phases * self.force_mask / torch.sqrt(torch.tensor(dt, device=self.device))
+        return forcing_hat
 
-        win_center_time = t_start + 0.5 * window_width_time
+    def _get_rhs_hat(self, omega_hat, u_hat, v_hat, dt):
+        """Computes the right-hand side of the vorticity equation."""
+        advection_hat = self._compute_advection_hat(omega_hat, u_hat, v_hat)
+        dissipation_hat = self.dissipation_op * omega_hat
+        forcing_hat = self._compute_forcing_hat(dt)
+        return advection_hat + dissipation_hat + forcing_hat
+
+    def _interpolate_velocity_at_tracers(self, tracer_pos, u, v):
+        """Interpolates the velocity field at tracer positions."""
+        pos_norm = (tracer_pos / self.L) * 2 - 1
+        grid = pos_norm.view(1, 1, self.N_tracers, 2)
+
+        u_field = u.view(1, 1, self.N, self.N)
+        v_field = v.view(1, 1, self.N, self.N)
+
+        u_interp = torch.nn.functional.grid_sample(u_field, grid, align_corners=True, mode='bilinear').squeeze()
+        v_interp = torch.nn.functional.grid_sample(v_field, grid, align_corners=True, mode='bilinear').squeeze()
+
+        return torch.stack([u_interp, v_interp], dim=1)
+
+    def _get_tracer_rhs(self, u_hat, v_hat):
+        """Computes the RHS for tracer advection (i.e., interpolated velocity)."""
+        u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+        v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
+        return self._interpolate_velocity_at_tracers(self.tracer_pos, u, v)
+
+    def _step(self, dt):
+        """Performs one full RK4 step for both fluid and tracers."""
+        u_hat0, v_hat0 = self._compute_velocity_hat(self.omega_hat)
+        k1_w = dt * self._get_rhs_hat(self.omega_hat, u_hat0, v_hat0, dt)
+        if self.tracer_pos is not None:
+            k1_p = dt * self._get_tracer_rhs(u_hat0, v_hat0)
+        else:
+            k1_p = 0
+
+        w_temp = self.omega_hat + 0.5 * k1_w
+        u_hat1, v_hat1 = self._compute_velocity_hat(w_temp)
+        k2_w = dt * self._get_rhs_hat(w_temp, u_hat1, v_hat1, dt)
+        if self.tracer_pos is not None:
+            p_temp = self.tracer_pos + 0.5 * k1_p
+            p_temp %= self.L
+            u1 = torch.fft.irfft2(u_hat1, s=(self.N, self.N))
+            v1 = torch.fft.irfft2(v_hat1, s=(self.N, self.N))
+            k2_p = dt * self._interpolate_velocity_at_tracers(p_temp, u1, v1)
+        else:
+            k2_p = 0
+
+        w_temp = self.omega_hat + 0.5 * k2_w
+        u_hat2, v_hat2 = self._compute_velocity_hat(w_temp)
+        k3_w = dt * self._get_rhs_hat(w_temp, u_hat2, v_hat2, dt)
+        if self.tracer_pos is not None:
+            p_temp = self.tracer_pos + 0.5 * k2_p
+            p_temp %= self.L
+            u2 = torch.fft.irfft2(u_hat2, s=(self.N, self.N))
+            v2 = torch.fft.irfft2(v_hat2, s=(self.N, self.N))
+            k3_p = dt * self._interpolate_velocity_at_tracers(p_temp, u2, v2)
+        else:
+            k3_p = 0
+
+        w_temp = self.omega_hat + k3_w
+        u_hat3, v_hat3 = self._compute_velocity_hat(w_temp)
+        k4_w = dt * self._get_rhs_hat(w_temp, u_hat3, v_hat3, dt)
+        if self.tracer_pos is not None:
+            p_temp = self.tracer_pos + k3_p
+            p_temp %= self.L
+            u3 = torch.fft.irfft2(u_hat3, s=(self.N, self.N))
+            v3 = torch.fft.irfft2(v_hat3, s=(self.N, self.N))
+            k4_p = dt * self._interpolate_velocity_at_tracers(p_temp, u3, v3)
+        else:
+            k4_p = 0
+
+        self.omega_hat += (k1_w + 2*k2_w + 2*k3_w + k4_w) / 6
+        if self.tracer_pos is not None:
+            self.tracer_pos += (k1_p + 2*k2_p + 2*k3_p + k4_p) / 6
+            self.tracer_pos %= self.L
         
-        win_pos = positions[win_indices]
-        win_vel = velocities[win_indices]
-        win_diag = diagnostics[win_indices]
+        self.t += dt
 
-        lags_time = np.array([0.5, 1.0, 2.0]) * t_l_initial
-        lags_steps = np.round(lags_time / dt_snap).astype(int)
-        lags_steps = np.unique(lags_steps[lags_steps > 0])
+    def _compute_diagnostics(self):
+        """Computes various diagnostic quantities for the current flow state."""
+        u_hat, v_hat = self._compute_velocity_hat(self.omega_hat)
         
-        alphas_mcc = []
-        alphas_hill = []
-        for lag in lags_steps:
-            if lag >= len(win_indices):
-                continue
-            disps = calculate_displacements(win_pos, lag)
-            alphas_mcc.append(estimate_alpha_mcculloch(disps))
-            alphas_hill.append(estimate_alpha_hill(disps))
+        energy_hat = 0.5 * (torch.abs(u_hat)**2 + torch.abs(v_hat)**2)
+        E_total = torch.sum(energy_hat) / (self.N**2)
+        U_rms = torch.sqrt(2 * E_total)
         
-        avg_alpha_mcc = np.nanmean(alphas_mcc) if alphas_mcc else np.nan
-        avg_alpha_hill = np.nanmean(alphas_hill) if alphas_hill else np.nan
-
-        gamma = estimate_gamma_msd(win_pos, dt_snap)
-        nu = estimate_nu_vacf(win_vel, dt_snap)
-
-        avg_k_peak = np.mean(win_diag['k_peak'])
-        avg_d_vv = np.mean(win_diag['d_vv_estimate'])
-
-        results.append({
-            'time': win_center_time,
-            'alpha_mcc': avg_alpha_mcc,
-            'alpha_hill': avg_alpha_hill,
-            'gamma': gamma,
-            'nu': nu,
-            'k_peak': avg_k_peak,
-            'd_vv': avg_d_vv
-        })
+        omega_sq_hat = torch.abs(self.omega_hat)**2
+        omega_rms = torch.sqrt(torch.sum(omega_sq_hat) / (self.N**2))
         
-        print("{:15.2f} | {:12.4f} | {:12.4f} | {:8.4f} | {:8.4f} | {:8.4f} | {:8.4f}".format(
-            win_center_time, avg_alpha_mcc, avg_alpha_hill, gamma, nu, avg_k_peak, avg_d_vv
-        ))
+        T_L = self.L / U_rms if U_rms > 0 else float('inf')
 
-    if not results:
-        print("\nNo valid windows found for analysis. The dataset might be too short.")
-        time_series = {
-            'window_center_times': np.array([]), 'alpha_mcculloch': np.array([]),
-            'alpha_hill': np.array([]), 'gamma': np.array([]), 'nu': np.array([]),
-            'k_peak': np.array([]), 'd_vv': np.array([])
+        energy_hat_flat = energy_hat.flatten()
+        energy_hat_flat_valid = energy_hat_flat[self.valid_k_mask_flat]
+        
+        E_k_sum = torch.bincount(self.k_bins_indices_flat_valid, weights=energy_hat_flat_valid, minlength=self.k_bins_max)
+        E_k = E_k_sum / self.k_counts_no_zero
+        
+        k_peak = self.k_values[torch.argmax(E_k)] if E_total > 0 else 0.0
+        d_vv_estimate = 2 * np.pi / k_peak if k_peak > 0 else float('inf')
+
+        diags = {
+            'time': self.t,
+            'E_total': E_total.item(),
+            'U_rms': U_rms.item(),
+            'omega_rms': omega_rms.item(),
+            'T_L': T_L.item(),
+            'k_peak': k_peak.item(),
+            'd_vv_estimate': d_vv_estimate.item() if isinstance(d_vv_estimate, torch.Tensor) else d_vv_estimate
         }
-    else:
-        time_series = {
-            'window_center_times': np.array([r['time'] for r in results]),
-            'alpha_mcculloch': np.array([r['alpha_mcc'] for r in results]),
-            'alpha_hill': np.array([r['alpha_hill'] for r in results]),
-            'gamma': np.array([r['gamma'] for r in results]),
-            'nu': np.array([r['nu'] for r in results]),
-            'k_peak': np.array([r['k_peak'] for r in results]),
-            'd_vv': np.array([r['d_vv'] for r in results])
-        }
+        return diags, (self.k_values.cpu().numpy(), E_k.cpu().numpy())
 
-    output_path = os.path.join("data", "non_stationary_analysis_timeseries.npz")
-    np.savez(output_path, **time_series)
-    print("\nTime series data saved to " + output_path)
+    def run_simulation(self):
+        """Executes the full simulation, including spinup and production phases."""
+        print("--- Starting Simulation ---")
+        
+        print("--- Starting Spinup Phase ---")
+        start_time_spinup = time.time()
+        last_print_time = self.t
+        while self.t < self.T_spinup_fixed:
+            u_hat, v_hat = self._compute_velocity_hat(self.omega_hat)
+            u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+            v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
+            U_max = torch.max(torch.sqrt(u**2 + v**2))
+            dt = self.CFL * self.dx / U_max if U_max > 0 else 0.1
+            
+            self._step(dt)
+            
+            if self.t - last_print_time >= 1.0:
+                diags, _ = self._compute_diagnostics()
+                elapsed = time.time() - start_time_spinup
+                eta = (elapsed / (self.t / self.T_spinup_fixed)) * (1 - self.t / self.T_spinup_fixed) if self.t > 0 else 0
+                print("Spinup: t={:.2f}/{:.2f}, U_rms={:.3f}, T_L={:.3f}, dt={:.2e}, ETA: {:.0f}s".format(
+                    self.t, self.T_spinup_fixed, diags['U_rms'], diags['T_L'], dt, eta))
+                last_print_time = self.t
+        
+        print("--- Spinup Phase Complete ---")
+
+        diags, _ = self._compute_diagnostics()
+        T_L_at_start_of_production = diags['T_L']
+        T_prod = 50 * T_L_at_start_of_production
+        self.params['T_L_at_start_of_production'] = T_L_at_start_of_production
+        self.params['T_prod'] = T_prod
+        
+        print("T_L at end of spinup: {:.3f}".format(T_L_at_start_of_production))
+        print("Production run duration: {:.3f}".format(T_prod))
+
+        if diags['U_rms'] * self.dt_snap >= 0.1:
+            print("WARNING: U_rms * dt_snap = {:.3f} >= 0.1. Snapshot interval may be too coarse.".format(
+                diags['U_rms'] * self.dt_snap))
+        
+        self.tracer_pos = torch.rand((self.N_tracers, 2), device=self.device) * self.L
+        
+        print("--- Starting Production Phase ---")
+        t_start_prod = self.t
+        t_end_prod = t_start_prod + T_prod
+        start_time_prod = time.time()
+        last_print_time = self.t
+        
+        next_tracer_snap_time = self.t
+        next_vel_snap_time = self.t
+        
+        tracer_pos_data = []
+        tracer_vel_data = []
+        tracer_times_data = []
+        vel_snapshots_data = []
+        vort_snapshots_data = []
+        vel_times_data = []
+        energy_spectrum_data = []
+        diagnostics_list = []
+        dt_list = []
+
+        while self.t < t_end_prod:
+            u_hat, v_hat = self._compute_velocity_hat(self.omega_hat)
+            u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+            v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
+            U_max = torch.max(torch.sqrt(u**2 + v**2))
+            dt = self.CFL * self.dx / U_max if U_max > 0 else 0.1
+            dt_list.append(dt.item())
+
+            if self.t >= next_tracer_snap_time:
+                diags, spec = self._compute_diagnostics()
+                tracer_vel = self._interpolate_velocity_at_tracers(self.tracer_pos, u, v)
+                
+                tracer_pos_data.append(self.tracer_pos.cpu().numpy().astype(np.float32))
+                tracer_vel_data.append(tracer_vel.cpu().numpy().astype(np.float32))
+                tracer_times_data.append(self.t)
+                energy_spectrum_data.append(spec[1])
+                diagnostics_list.append(tuple(diags.values()))
+                
+                next_tracer_snap_time += self.dt_snap
+
+            if self.t >= next_vel_snap_time:
+                omega = torch.fft.irfft2(self.omega_hat, s=(self.N, self.N))
+                
+                coarse_pool = torch.nn.AvgPool2d(self.coarsening_factor)
+                u_coarse = coarse_pool(u.unsqueeze(0).unsqueeze(0)).squeeze()
+                v_coarse = coarse_pool(v.unsqueeze(0).unsqueeze(0)).squeeze()
+                omega_coarse = coarse_pool(omega.unsqueeze(0).unsqueeze(0)).squeeze()
+                
+                vel_snapshots_data.append(torch.stack([u_coarse, v_coarse]).cpu().numpy().astype(np.float32))
+                vort_snapshots_data.append(omega_coarse.cpu().numpy().astype(np.float32))
+                vel_times_data.append(self.t)
+                
+                next_vel_snap_time += self.dt_vel
+
+            self._step(dt)
+
+            if self.t - last_print_time >= 5.0:
+                progress = (self.t - t_start_prod) / T_prod
+                elapsed = time.time() - start_time_prod
+                eta = (elapsed / progress) * (1 - progress) if progress > 0 else 0
+                diags, _ = self._compute_diagnostics()
+                print("Production: t={:.2f}/{:.2f} ({:.1f}%), U_rms={:.3f}, dt={:.2e}, ETA: {:.0f}s".format(
+                    self.t - t_start_prod, T_prod, progress * 100, diags['U_rms'], dt, eta))
+                last_print_time = self.t
+
+        print("--- Production Phase Complete ---")
+        
+        print("--- Saving Data ---")
+        self.params['dt_actual'] = np.mean(dt_list)
+        self.params['N_tracer_snaps'] = len(tracer_times_data)
+        self.params['N_vel_snaps'] = len(vel_times_data)
+
+        np.save(os.path.join(self.output_path, 'tracer_positions.npy'), np.array(tracer_pos_data))
+        np.save(os.path.join(self.output_path, 'tracer_velocities.npy'), np.array(tracer_vel_data))
+        np.save(os.path.join(self.output_path, 'tracer_times.npy'), np.array(tracer_times_data, dtype=np.float64))
+        np.save(os.path.join(self.output_path, 'velocity_snapshots.npy'), np.array(vel_snapshots_data))
+        np.save(os.path.join(self.output_path, 'vorticity_snapshots.npy'), np.array(vort_snapshots_data))
+        np.save(os.path.join(self.output_path, 'vel_times.npy'), np.array(vel_times_data, dtype=np.float64))
+        np.save(os.path.join(self.output_path, 'energy_spectrum.npy'), np.array(energy_spectrum_data, dtype=np.float64))
+        
+        diag_dtype = [('time', 'f8'), ('E_total', 'f8'), ('U_rms', 'f8'), ('omega_rms', 'f8'), 
+                      ('T_L', 'f8'), ('k_peak', 'f8'), ('d_vv_estimate', 'f8')]
+        diagnostics_array = np.array(diagnostics_list, dtype=diag_dtype)
+        np.save(os.path.join(self.output_path, 'diagnostics.npy'), diagnostics_array)
+
+        with open(os.path.join(self.output_path, 'sim_params.json'), 'w') as f:
+            json.dump(self.params, f, indent=4)
+            
+        print("Data saved to: " + self.output_path)
+        print("--- Simulation Finished ---")
+
 
 if __name__ == '__main__':
-    analyze_non_stationarity()
+    simulation_parameters = {
+        'N': 1024,
+        'N_coarse': 256,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'output_path': '/home/node/work/projects/levy_flights_2dns_v2/data/',
+        'CFL': 0.4,
+        'nu_h': 1e-19,
+        'p': 4,
+        'epsilon_inj': 0.1,
+        'k_force_min': 3.0,
+        'k_force_max': 5.0,
+        'N_tracers': 5000,
+        'dt_snap': 0.05,
+        'dt_vel': 2.0,
+        'T_spinup_fixed': 60.0,
+    }
+
+    if simulation_parameters['device'] == 'cpu':
+        print("WARNING: No CUDA device found. Running on CPU. This will be extremely slow.")
+
+    solver = NavierStokes2DSolver(simulation_parameters)
+    solver.run_simulation()
 ```

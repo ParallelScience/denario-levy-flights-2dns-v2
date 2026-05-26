@@ -4,218 +4,408 @@ import os
 sys.path.insert(0, os.path.abspath("codebase"))
 sys.path.insert(0, "/home/node/data/compsep_data/")
 sys.path.insert(0, "/home/node/data/compsep_data/")
-import json
-import os
-import sys
-import time
+sys.path.insert(0, "/home/node/data/compsep_data/")
+sys.path.insert(0, "/home/node/data/compsep_data/")
+import torch
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import os
+import json
+import time
 
-def load_data(base_path):
+class NavierStokes2DSolver:
     """
-    Loads all simulation data files from the specified base path.
+    A GPU-accelerated 2D Navier-Stokes solver using the pseudo-spectral method.
 
-    Args:
-        base_path (str): The absolute path to the directory containing the data files.
+    This class simulates the evolution of a 2D turbulent flow and the advection
+    of passive tracers within it. The simulation is performed on a doubly-periodic
+    square domain.
 
-    Returns:
-        tuple: A tuple containing the simulation parameters and loaded numpy arrays.
+    Key features:
+    - Pseudo-spectral method for spatial derivatives.
+    - RK4 for time integration with an adaptive timestep (CFL-based).
+    - Hyperviscosity for small-scale dissipation.
+    - Stochastic white-in-time forcing in a specified wavenumber shell.
+    - Advection of passive Lagrangian tracers using bilinear interpolation.
+    - Two-phase simulation: spinup followed by a production run.
+    - Regular snapshotting of tracer and Eulerian field data.
+    - All computations are performed on a CUDA-enabled GPU using PyTorch.
     """
-    print("--- Loading Data ---")
-    paths = {
-        "params": os.path.join(base_path, 'sim_params.json'),
-        "positions": os.path.join(base_path, 'tracer_positions.npy'),
-        "velocities": os.path.join(base_path, 'tracer_velocities.npy'),
-        "tracer_times": os.path.join(base_path, 'tracer_times.npy'),
-        "energy_spectrum": os.path.join(base_path, 'energy_spectrum.npy'),
-        "diagnostics": os.path.join(base_path, 'diagnostics.npy'),
-    }
 
-    try:
-        with open(paths["params"], 'r') as f:
-            sim_params = json.load(f)
+    def __init__(self, params):
+        """
+        Initializes the solver with specified parameters.
 
-        tracer_positions = np.load(paths["positions"])
-        tracer_velocities = np.load(paths["velocities"])
-        tracer_times = np.load(paths["tracer_times"])
-        energy_spectrum = np.load(paths["energy_spectrum"])
-        diagnostics = np.load(paths["diagnostics"])
-    except FileNotFoundError as e:
-        print("Error: A data file was not found.")
-        print(e)
-        sys.exit(1)
+        Args:
+            params (dict): A dictionary containing all simulation parameters.
+        """
+        self.params = params
+        self.N = params['N']
+        self.device = torch.device(params['device'])
+        self.output_path = params['output_path']
+        os.makedirs(self.output_path, exist_ok=True)
 
-    print("Data loading complete.")
-    return sim_params, tracer_positions, tracer_velocities, tracer_times, energy_spectrum, diagnostics
+        self.L = 2 * np.pi
+        self.dx = self.L / self.N
+        self.CFL = params['CFL']
+        self.nu_h = params['nu_h']
+        self.p = params['p']
+        self.epsilon_inj = params['epsilon_inj']
+        self.k_force_min = params['k_force_min']
+        self.k_force_max = params['k_force_max']
+        self.N_tracers = params['N_tracers']
+        self.dt_snap = params['dt_snap']
+        self.dt_vel = params['dt_vel']
+        self.T_spinup_fixed = params['T_spinup_fixed']
+        self.coarsening_factor = self.N // params['N_coarse']
 
-def verify_data(sim_params, tracer_positions, tracer_velocities, tracer_times, energy_spectrum, diagnostics):
-    """
-    Verifies and prints the shapes and data types of the loaded arrays.
+        self._setup_grid_and_wavenumbers()
+        self._setup_operators()
 
-    Args:
-        sim_params (dict): Simulation parameters.
-        tracer_positions (np.ndarray): Tracer positions.
-        tracer_velocities (np.ndarray): Tracer velocities.
-        tracer_times (np.ndarray): Tracer snapshot times.
-        energy_spectrum (np.ndarray): Energy spectrum data.
-        diagnostics (np.ndarray): Diagnostic data.
-    """
-    print("\n--- Verifying Data Shapes and Types ---")
-    print("Simulation Parameters: " + str(list(sim_params.keys())))
-    print("Tracer Positions: shape=" + str(tracer_positions.shape) + ", dtype=" + str(tracer_positions.dtype))
-    print("Tracer Velocities: shape=" + str(tracer_velocities.shape) + ", dtype=" + str(tracer_velocities.dtype))
-    print("Tracer Times: shape=" + str(tracer_times.shape) + ", dtype=" + str(tracer_times.dtype))
-    print("Energy Spectrum: shape=" + str(energy_spectrum.shape) + ", dtype=" + str(energy_spectrum.dtype))
-    print("Diagnostics: shape=" + str(diagnostics.shape) + ", dtype=" + str(diagnostics.dtype))
+        self.t = 0.0
+        self.omega_hat = self._initialize_field()
+        self.tracer_pos = None
 
-def check_snapshot_quality(tracer_positions):
-    """
-    Performs a snapshot quality check by computing the mean tracer displacement.
-
-    Args:
-        tracer_positions (np.ndarray): Tracer positions array.
-    """
-    print("\n--- Snapshot Quality Check ---")
-    if tracer_positions.shape[0] < 2:
-        print("Not enough tracer snapshots to check quality.")
-        return
+    def _setup_grid_and_wavenumbers(self):
+        """Sets up the computational grid and wavenumbers in spectral space."""
+        k = torch.fft.fftfreq(self.N, d=self.dx) * self.L
+        k_rfft = torch.fft.rfftfreq(self.N, d=self.dx) * self.L
         
-    domain_size = 2 * np.pi
-    delta_r = tracer_positions[1] - tracer_positions[0]
-    delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size
-    
-    displacements = np.sqrt(np.sum(delta_r**2, axis=1))
-    mean_displacement = np.mean(displacements)
-    
-    threshold = 0.3 * domain_size
-    print("Mean tracer displacement per snapshot: " + str(mean_displacement))
-    print("Threshold (0.3 * 2pi): " + str(threshold))
-
-    if mean_displacement > threshold:
-        print("Error: Mean displacement exceeds threshold. Snapshot interval is too coarse.")
-        sys.exit(1)
-    else:
-        print("Snapshot quality check passed.")
-
-def calculate_vacf(tracer_velocities, dt_snap):
-    """
-    Calculates the Velocity Autocorrelation Function (VACF) and decorrelation time.
-
-    Args:
-        tracer_velocities (np.ndarray): Tracer velocities array.
-        dt_snap (float): Time interval between tracer snapshots.
-    """
-    print("\n--- Velocity Autocorrelation Analysis ---")
-    if tracer_velocities.shape[0] < 2:
-        print("Not enough tracer snapshots for VACF analysis.")
-        return
+        kx_grid, ky_grid = torch.meshgrid(k, k_rfft, indexing='ij')
+        self.k_squared = (kx_grid**2 + ky_grid**2).to(self.device)
+        self.k_magnitude = torch.sqrt(self.k_squared)
         
-    lags_to_check = [1, 2, 4, 8, 16]
-    max_lag_for_corr = min(200, tracer_velocities.shape[0] - 1)
-    
-    v_sq_mean = np.mean(np.sum(tracer_velocities**2, axis=2))
-    if v_sq_mean == 0:
-        print("Warning: Mean squared velocity is zero. Cannot compute VACF.")
-        return
+        self.kx_grid_full = kx_grid.to(self.device)
+        self.ky_grid_full = ky_grid.to(self.device)
 
-    vacf_values = []
-    for lag in range(1, max_lag_for_corr + 1):
-        dot_prod = np.sum(tracer_velocities[:-lag] * tracer_velocities[lag:], axis=2)
-        vacf = np.mean(dot_prod) / v_sq_mean
-        vacf_values.append(vacf)
-        if lag in lags_to_check:
-            print("VACF at lag " + str(lag) + " steps: " + str(vacf))
+        self.k_squared_no_zero = self.k_squared.clone()
+        self.k_squared_no_zero[0, 0] = 1.0
 
-    vacf_values = np.array(vacf_values)
-    corr_lag_idx = np.where(vacf_values < 1/np.e)[0]
-    if len(corr_lag_idx) > 0:
-        decorrelation_lag = corr_lag_idx[0] + 1
-        tau_corr = decorrelation_lag * dt_snap
-        print("Decorrelation time (tau_corr): " + str(tau_corr) + " (at lag " + str(decorrelation_lag) + ")")
-    else:
-        print("VACF did not drop below 1/e within " + str(max_lag_for_corr) + " lags.")
+    def _setup_operators(self):
+        """Pre-computes spectral operators for dissipation, de-aliasing, and forcing."""
+        self.dissipation_op = -self.nu_h * (self.k_squared**self.p)
 
-def verify_inverse_cascade(energy_spectrum, diagnostics, tracer_times, sim_params):
-    """
-    Confirms the inverse cascade by plotting energy spectra and k_peak evolution.
+        k_max_dealias = self.N / 3.0
+        self.dealias_mask = (torch.abs(self.kx_grid_full) < k_max_dealias) & \
+                            (torch.abs(self.ky_grid_full) < k_max_dealias)
+        self.dealias_mask = self.dealias_mask.to(self.device)
 
-    Args:
-        energy_spectrum (np.ndarray): Energy spectrum data.
-        diagnostics (np.ndarray): Diagnostic data.
-        tracer_times (np.ndarray): Tracer snapshot times.
-        sim_params (dict): Simulation parameters.
-    """
-    print("\n--- Inverse Cascade Verification ---")
-    if len(tracer_times) == 0:
-        print("No tracer times found. Skipping inverse cascade verification.")
-        return
+        self.force_mask = (self.k_magnitude >= self.k_force_min) & \
+                          (self.k_magnitude <= self.k_force_max)
+        self.force_mask = self.force_mask.to(self.device)
+        self.num_force_modes = torch.sum(self.force_mask)
+        if self.num_force_modes > 0:
+            self.force_amplitude = torch.sqrt(2 * self.epsilon_inj * self.num_force_modes / (self.L**2))
+        else:
+            self.force_amplitude = 0
+
+        k_bins_indices = torch.floor(self.k_magnitude).long()
+        self.k_bins_max = self.N // 2
+        self.k_values = torch.arange(self.k_bins_max, device=self.device)
         
-    plt.rcParams['text.usetex'] = False
-    
-    t_prod = sim_params.get('T_prod', tracer_times[-1] - tracer_times[0])
-    time_fractions = [0.1, 0.3, 0.6, 1.0]
-    target_times = [tracer_times[0] + frac * t_prod for frac in time_fractions]
-    time_indices = [np.argmin(np.abs(tracer_times - t)) for t in target_times]
+        valid_k_mask = k_bins_indices < self.k_bins_max
+        self.valid_k_mask_flat = valid_k_mask.flatten()
+        self.k_bins_indices_flat_valid = k_bins_indices.flatten()[self.valid_k_mask_flat]
 
-    # Plot 1: Energy Spectrum Evolution
-    fig1, ax1 = plt.subplots(figsize=(10, 7))
-    k = np.arange(0.5, energy_spectrum.shape[1] + 0.5)
-    
-    print("k_peak values at specified times:")
-    for i, index in enumerate(time_indices):
-        time_val = tracer_times[index]
-        label_text = 't = ' + "{:.2f}".format(time_val)
-        ax1.loglog(k, energy_spectrum[index, :], label=label_text)
-        k_peak_val = diagnostics['k_peak'][index]
-        print("  t = " + "{:.2f}".format(time_val) + ", k_peak = " + str(k_peak_val))
+        k_counts = torch.bincount(self.k_bins_indices_flat_valid, minlength=self.k_bins_max)
+        self.k_counts_no_zero = torch.where(k_counts > 0, k_counts, 1).to(self.device)
 
-    ax1.set_xlabel('Wavenumber, k')
-    ax1.set_ylabel('Energy Spectrum, E(k)')
-    ax1.set_title('Energy Spectrum Evolution')
-    ax1.grid(True, which="both", ls="--")
-    ax1.legend()
-    plt.tight_layout()
-    
-    timestamp = int(time.time())
-    output_dir = "data/"
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    def _initialize_field(self):
+        """Initializes the vorticity field with small random noise."""
+        omega = torch.randn((self.N, self.N), device=self.device) * 1e-3
+        return torch.fft.rfft2(omega)
+
+    def _compute_velocity_hat(self, omega_hat):
+        """Computes velocity components in spectral space from vorticity."""
+        psi_hat = -omega_hat / self.k_squared_no_zero
+        psi_hat[0, 0] = 0.0
+        u_hat = 1j * self.ky_grid_full * psi_hat
+        v_hat = -1j * self.kx_grid_full * psi_hat
+        return u_hat, v_hat
+
+    def _compute_advection_hat(self, omega_hat, u_hat, v_hat):
+        """Computes the advection term in spectral space."""
+        omega = torch.fft.irfft2(omega_hat, s=(self.N, self.N))
+        u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+        v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
         
-    filepath1 = os.path.join(output_dir, 'energy_spectrum_evolution_1_' + str(timestamp) + '.png')
-    plt.savefig(filepath1, dpi=300)
-    plt.close(fig1)
-    print("Plot saved to " + filepath1)
+        u_omega = torch.fft.rfft2(u * omega)
+        v_omega = torch.fft.rfft2(v * omega)
+        
+        advection_hat = -1j * self.kx_grid_full * u_omega - 1j * self.ky_grid_full * v_omega
+        return advection_hat * self.dealias_mask
 
-    # Plot 2: k_peak Evolution
-    fig2, ax2 = plt.subplots(figsize=(10, 7))
-    ax2.plot(diagnostics['time'], diagnostics['k_peak'], label='k_peak(t)')
-    ax2.scatter(tracer_times[time_indices], diagnostics['k_peak'][time_indices], color='red', zorder=5, label='Spectrum plot times')
-    
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('Peak Wavenumber, k_peak')
-    ax2.set_title('Peak Wavenumber Evolution')
-    ax2.grid(True)
-    ax2.legend()
-    plt.tight_layout()
-    
-    filepath2 = os.path.join(output_dir, 'k_peak_evolution_1_' + str(timestamp) + '.png')
-    plt.savefig(filepath2, dpi=300)
-    plt.close(fig2)
-    print("Plot saved to " + filepath2)
+    def _compute_forcing_hat(self, dt):
+        """Generates the stochastic forcing term in spectral space."""
+        if self.force_amplitude == 0:
+            return torch.zeros_like(self.omega_hat)
+        
+        rand_phases = torch.exp(2j * np.pi * torch.rand(self.omega_hat.shape, device=self.device))
+        forcing_hat = self.force_amplitude * rand_phases * self.force_mask / torch.sqrt(torch.tensor(dt, device=self.device))
+        return forcing_hat
+
+    def _get_rhs_hat(self, omega_hat, u_hat, v_hat, dt):
+        """Computes the right-hand side of the vorticity equation."""
+        advection_hat = self._compute_advection_hat(omega_hat, u_hat, v_hat)
+        dissipation_hat = self.dissipation_op * omega_hat
+        forcing_hat = self._compute_forcing_hat(dt)
+        return advection_hat + dissipation_hat + forcing_hat
+
+    def _interpolate_velocity_at_tracers(self, tracer_pos, u, v):
+        """Interpolates the velocity field at tracer positions."""
+        pos_norm = (tracer_pos / self.L) * 2 - 1
+        grid = pos_norm.view(1, 1, self.N_tracers, 2)
+
+        u_field = u.view(1, 1, self.N, self.N)
+        v_field = v.view(1, 1, self.N, self.N)
+
+        u_interp = torch.nn.functional.grid_sample(u_field, grid, align_corners=True, mode='bilinear').squeeze()
+        v_interp = torch.nn.functional.grid_sample(v_field, grid, align_corners=True, mode='bilinear').squeeze()
+
+        return torch.stack([u_interp, v_interp], dim=1)
+
+    def _get_tracer_rhs(self, u_hat, v_hat):
+        """Computes the RHS for tracer advection (i.e., interpolated velocity)."""
+        u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+        v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
+        return self._interpolate_velocity_at_tracers(self.tracer_pos, u, v)
+
+    def _step(self, dt):
+        """Performs one full RK4 step for both fluid and tracers."""
+        u_hat0, v_hat0 = self._compute_velocity_hat(self.omega_hat)
+        k1_w = dt * self._get_rhs_hat(self.omega_hat, u_hat0, v_hat0, dt)
+        if self.tracer_pos is not None:
+            k1_p = dt * self._get_tracer_rhs(u_hat0, v_hat0)
+        else:
+            k1_p = 0
+
+        w_temp = self.omega_hat + 0.5 * k1_w
+        u_hat1, v_hat1 = self._compute_velocity_hat(w_temp)
+        k2_w = dt * self._get_rhs_hat(w_temp, u_hat1, v_hat1, dt)
+        if self.tracer_pos is not None:
+            p_temp = self.tracer_pos + 0.5 * k1_p
+            p_temp %= self.L
+            u1 = torch.fft.irfft2(u_hat1, s=(self.N, self.N))
+            v1 = torch.fft.irfft2(v_hat1, s=(self.N, self.N))
+            k2_p = dt * self._interpolate_velocity_at_tracers(p_temp, u1, v1)
+        else:
+            k2_p = 0
+
+        w_temp = self.omega_hat + 0.5 * k2_w
+        u_hat2, v_hat2 = self._compute_velocity_hat(w_temp)
+        k3_w = dt * self._get_rhs_hat(w_temp, u_hat2, v_hat2, dt)
+        if self.tracer_pos is not None:
+            p_temp = self.tracer_pos + 0.5 * k2_p
+            p_temp %= self.L
+            u2 = torch.fft.irfft2(u_hat2, s=(self.N, self.N))
+            v2 = torch.fft.irfft2(v_hat2, s=(self.N, self.N))
+            k3_p = dt * self._interpolate_velocity_at_tracers(p_temp, u2, v2)
+        else:
+            k3_p = 0
+
+        w_temp = self.omega_hat + k3_w
+        u_hat3, v_hat3 = self._compute_velocity_hat(w_temp)
+        k4_w = dt * self._get_rhs_hat(w_temp, u_hat3, v_hat3, dt)
+        if self.tracer_pos is not None:
+            p_temp = self.tracer_pos + k3_p
+            p_temp %= self.L
+            u3 = torch.fft.irfft2(u_hat3, s=(self.N, self.N))
+            v3 = torch.fft.irfft2(v_hat3, s=(self.N, self.N))
+            k4_p = dt * self._interpolate_velocity_at_tracers(p_temp, u3, v3)
+        else:
+            k4_p = 0
+
+        self.omega_hat += (k1_w + 2*k2_w + 2*k3_w + k4_w) / 6
+        if self.tracer_pos is not None:
+            self.tracer_pos += (k1_p + 2*k2_p + 2*k3_p + k4_p) / 6
+            self.tracer_pos %= self.L
+        
+        self.t += dt
+
+    def _compute_diagnostics(self):
+        """Computes various diagnostic quantities for the current flow state."""
+        u_hat, v_hat = self._compute_velocity_hat(self.omega_hat)
+        
+        energy_hat = 0.5 * (torch.abs(u_hat)**2 + torch.abs(v_hat)**2)
+        E_total = torch.sum(energy_hat) / (self.N**2)
+        U_rms = torch.sqrt(2 * E_total)
+        
+        omega_sq_hat = torch.abs(self.omega_hat)**2
+        omega_rms = torch.sqrt(torch.sum(omega_sq_hat) / (self.N**2))
+        
+        T_L = self.L / U_rms if U_rms > 0 else float('inf')
+
+        energy_hat_flat = energy_hat.flatten()
+        energy_hat_flat_valid = energy_hat_flat[self.valid_k_mask_flat]
+        
+        E_k_sum = torch.bincount(self.k_bins_indices_flat_valid, weights=energy_hat_flat_valid, minlength=self.k_bins_max)
+        E_k = E_k_sum / self.k_counts_no_zero
+        
+        k_peak = self.k_values[torch.argmax(E_k)] if E_total > 0 else 0.0
+        d_vv_estimate = 2 * np.pi / k_peak if k_peak > 0 else float('inf')
+
+        diags = {
+            'time': self.t,
+            'E_total': E_total.item(),
+            'U_rms': U_rms.item(),
+            'omega_rms': omega_rms.item(),
+            'T_L': T_L.item(),
+            'k_peak': k_peak.item(),
+            'd_vv_estimate': d_vv_estimate.item() if isinstance(d_vv_estimate, torch.Tensor) else d_vv_estimate
+        }
+        return diags, (self.k_values.cpu().numpy(), E_k.cpu().numpy())
+
+    def run_simulation(self):
+        """Executes the full simulation, including spinup and production phases."""
+        print("--- Starting Simulation ---")
+        
+        print("--- Starting Spinup Phase ---")
+        start_time_spinup = time.time()
+        last_print_time = self.t
+        while self.t < self.T_spinup_fixed:
+            u_hat, v_hat = self._compute_velocity_hat(self.omega_hat)
+            u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+            v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
+            U_max = torch.max(torch.sqrt(u**2 + v**2))
+            dt = self.CFL * self.dx / U_max if U_max > 0 else 0.1
+            
+            self._step(dt)
+            
+            if self.t - last_print_time >= 1.0:
+                diags, _ = self._compute_diagnostics()
+                elapsed = time.time() - start_time_spinup
+                eta = (elapsed / (self.t / self.T_spinup_fixed)) * (1 - self.t / self.T_spinup_fixed) if self.t > 0 else 0
+                print("Spinup: t={:.2f}/{:.2f}, U_rms={:.3f}, T_L={:.3f}, dt={:.2e}, ETA: {:.0f}s".format(
+                    self.t, self.T_spinup_fixed, diags['U_rms'], diags['T_L'], dt, eta))
+                last_print_time = self.t
+        
+        print("--- Spinup Phase Complete ---")
+
+        diags, _ = self._compute_diagnostics()
+        T_L_at_start_of_production = diags['T_L']
+        T_prod = 50 * T_L_at_start_of_production
+        self.params['T_L_at_start_of_production'] = T_L_at_start_of_production
+        self.params['T_prod'] = T_prod
+        
+        print("T_L at end of spinup: {:.3f}".format(T_L_at_start_of_production))
+        print("Production run duration: {:.3f}".format(T_prod))
+
+        if diags['U_rms'] * self.dt_snap >= 0.1:
+            print("WARNING: U_rms * dt_snap = {:.3f} >= 0.1. Snapshot interval may be too coarse.".format(
+                diags['U_rms'] * self.dt_snap))
+        
+        self.tracer_pos = torch.rand((self.N_tracers, 2), device=self.device) * self.L
+        
+        print("--- Starting Production Phase ---")
+        t_start_prod = self.t
+        t_end_prod = t_start_prod + T_prod
+        start_time_prod = time.time()
+        last_print_time = self.t
+        
+        next_tracer_snap_time = self.t
+        next_vel_snap_time = self.t
+        
+        tracer_pos_data = []
+        tracer_vel_data = []
+        tracer_times_data = []
+        vel_snapshots_data = []
+        vort_snapshots_data = []
+        vel_times_data = []
+        energy_spectrum_data = []
+        diagnostics_list = []
+        dt_list = []
+
+        while self.t < t_end_prod:
+            u_hat, v_hat = self._compute_velocity_hat(self.omega_hat)
+            u = torch.fft.irfft2(u_hat, s=(self.N, self.N))
+            v = torch.fft.irfft2(v_hat, s=(self.N, self.N))
+            U_max = torch.max(torch.sqrt(u**2 + v**2))
+            dt = self.CFL * self.dx / U_max if U_max > 0 else 0.1
+            dt_list.append(dt.item())
+
+            if self.t >= next_tracer_snap_time:
+                diags, spec = self._compute_diagnostics()
+                tracer_vel = self._interpolate_velocity_at_tracers(self.tracer_pos, u, v)
+                
+                tracer_pos_data.append(self.tracer_pos.cpu().numpy().astype(np.float32))
+                tracer_vel_data.append(tracer_vel.cpu().numpy().astype(np.float32))
+                tracer_times_data.append(self.t)
+                energy_spectrum_data.append(spec[1])
+                diagnostics_list.append(tuple(diags.values()))
+                
+                next_tracer_snap_time += self.dt_snap
+
+            if self.t >= next_vel_snap_time:
+                omega = torch.fft.irfft2(self.omega_hat, s=(self.N, self.N))
+                
+                coarse_pool = torch.nn.AvgPool2d(self.coarsening_factor)
+                u_coarse = coarse_pool(u.unsqueeze(0).unsqueeze(0)).squeeze()
+                v_coarse = coarse_pool(v.unsqueeze(0).unsqueeze(0)).squeeze()
+                omega_coarse = coarse_pool(omega.unsqueeze(0).unsqueeze(0)).squeeze()
+                
+                vel_snapshots_data.append(torch.stack([u_coarse, v_coarse]).cpu().numpy().astype(np.float32))
+                vort_snapshots_data.append(omega_coarse.cpu().numpy().astype(np.float32))
+                vel_times_data.append(self.t)
+                
+                next_vel_snap_time += self.dt_vel
+
+            self._step(dt)
+
+            if self.t - last_print_time >= 5.0:
+                progress = (self.t - t_start_prod) / T_prod
+                elapsed = time.time() - start_time_prod
+                eta = (elapsed / progress) * (1 - progress) if progress > 0 else 0
+                diags, _ = self._compute_diagnostics()
+                print("Production: t={:.2f}/{:.2f} ({:.1f}%), U_rms={:.3f}, dt={:.2e}, ETA: {:.0f}s".format(
+                    self.t - t_start_prod, T_prod, progress * 100, diags['U_rms'], dt, eta))
+                last_print_time = self.t
+
+        print("--- Production Phase Complete ---")
+        
+        print("--- Saving Data ---")
+        self.params['dt_actual'] = np.mean(dt_list)
+        self.params['N_tracer_snaps'] = len(tracer_times_data)
+        self.params['N_vel_snaps'] = len(vel_times_data)
+
+        np.save(os.path.join(self.output_path, 'tracer_positions.npy'), np.array(tracer_pos_data))
+        np.save(os.path.join(self.output_path, 'tracer_velocities.npy'), np.array(tracer_vel_data))
+        np.save(os.path.join(self.output_path, 'tracer_times.npy'), np.array(tracer_times_data, dtype=np.float64))
+        np.save(os.path.join(self.output_path, 'velocity_snapshots.npy'), np.array(vel_snapshots_data))
+        np.save(os.path.join(self.output_path, 'vorticity_snapshots.npy'), np.array(vort_snapshots_data))
+        np.save(os.path.join(self.output_path, 'vel_times.npy'), np.array(vel_times_data, dtype=np.float64))
+        np.save(os.path.join(self.output_path, 'energy_spectrum.npy'), np.array(energy_spectrum_data, dtype=np.float64))
+        
+        diag_dtype = [('time', 'f8'), ('E_total', 'f8'), ('U_rms', 'f8'), ('omega_rms', 'f8'), 
+                      ('T_L', 'f8'), ('k_peak', 'f8'), ('d_vv_estimate', 'f8')]
+        diagnostics_array = np.array(diagnostics_list, dtype=diag_dtype)
+        np.save(os.path.join(self.output_path, 'diagnostics.npy'), diagnostics_array)
+
+        with open(os.path.join(self.output_path, 'sim_params.json'), 'w') as f:
+            json.dump(self.params, f, indent=4)
+            
+        print("Data saved to: " + self.output_path)
+        print("--- Simulation Finished ---")
+
 
 if __name__ == '__main__':
-    BASE_DATA_PATH = '/home/node/work/projects/levy_flights_2dns_v2/data/'
-    
-    params, positions, velocities, times, spectrum, diags = load_data(BASE_DATA_PATH)
-    
-    verify_data(params, positions, velocities, times, spectrum, diags)
-    
-    check_snapshot_quality(positions)
-    
-    calculate_vacf(velocities, params.get('dt_snap', 0.05))
-    
-    verify_inverse_cascade(spectrum, diags, times, params)
-    
-    print("\nStep 1: Data loading and initial verification complete.")
+    simulation_parameters = {
+        'N': 1024,
+        'N_coarse': 256,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'output_path': '/home/node/work/projects/levy_flights_2dns_v2/data/',
+        'CFL': 0.4,
+        'nu_h': 1e-19,
+        'p': 4,
+        'epsilon_inj': 0.1,
+        'k_force_min': 3.0,
+        'k_force_max': 5.0,
+        'N_tracers': 5000,
+        'dt_snap': 0.05,
+        'dt_vel': 2.0,
+        'T_spinup_fixed': 60.0,
+    }
+
+    if simulation_parameters['device'] == 'cpu':
+        print("WARNING: No CUDA device found. Running on CPU. This will be extremely slow.")
+
+    solver = NavierStokes2DSolver(simulation_parameters)
+    solver.run_simulation()

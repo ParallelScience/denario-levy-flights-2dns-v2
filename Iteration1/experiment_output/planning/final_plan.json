@@ -2,120 +2,96 @@
     "sub_tasks": [
         {
             "bullet_points": [
-                "Load all simulation data files from the specified absolute paths, including parameters from `sim_params.json`.",
-                "Verify and print the shapes and data types of the loaded arrays to confirm they match the problem description.",
-                "Perform a snapshot quality check by computing the mean tracer displacement for a single time step (`Δt_snap`). Print the numerical result and halt with an error if it exceeds `0.3 * 2π`.",
-                "Verify velocity memory by computing the Velocity Autocorrelation Function (VACF) at short time lags (1, 2, 4, 8, 16 steps). Print the VACF value for each lag. Calculate and print the decorrelation time `τ_corr`.",
-                "Confirm the inverse cascade by plotting the energy spectrum `E(k)` at four distinct times (10%, 30%, 60%, 100% of `T_prod`).",
-                "Plot the peak wavenumber `k_peak` as a function of time. Print the `k_peak` values corresponding to the four energy spectra plots.",
-                "Save the generated plots to the output directory."
+                "Implement and execute the GPU-accelerated 2D pseudo-spectral Navier-Stokes solver as described in the \"Simulation Design\" section.",
+                "Adhere strictly to the specified parameters: N=1024x1024, forcing at k ∈ [3, 5], hyperviscosity ν_h = 1e-19 with p=4.",
+                "Implement the adaptive RK4 timestep controlled by the CFL condition evaluated as `dt = CFL * dx / U_max`, where `U_max` is the maximum pointwise velocity magnitude on the grid.",
+                "Implement a fixed-time spinup of `T_spinup_fixed = 60.0` simulation time units. After spinup, calculate the large-eddy turnover time `T_L_at_start_of_production` and set the production run duration to `T_prod = 50 * T_L_at_start_of_production`.",
+                "Seed 5000 passive tracers uniformly at the start of the production run. Advect tracers using bilinear interpolation of the Eulerian velocity field, ensuring tracer positions are updated within the same RK4 substeps as the fluid solver.",
+                "Implement the snapshot strategy: save tracer data every `Δt_snap = 0.05` and coarsened (1024→256) Eulerian fields every `Δt_vel = 2.0`.",
+                "Optimize the azimuthal energy spectrum computation to avoid slowing the main simulation loop (e.g., by batching or deferring). Extract `k_peak` for the diagnostics from this same computation to prevent redundant FFTs.",
+                "Before starting the production run, verify that the condition `U_rms * Δt_snap < 0.1` is met.",
+                "Save all output files (`tracer_positions.npy`, `tracer_velocities.npy`, `vorticity_snapshots.npy`, `velocity_snapshots.npy`, `tracer_times.npy`, `vel_times.npy`, `energy_spectrum.npy`, `diagnostics.npy`, `sim_params.json`) to the absolute path `/home/node/work/projects/levy_flights_2dns_v2/data/`."
             ],
-            "sub_task": "Data Loading and Initial Verification",
+            "sub_task": "2D Navier-Stokes Direct Numerical Simulation",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 14400
+        },
+        {
+            "bullet_points": [
+                "Load all simulation output files from `/home/node/work/projects/levy_flights_2dns_v2/data/`.",
+                "Perform verification checks as outlined in \"Analysis Tasks: Task 1\".",
+                "Compute the mean tracer displacement per snapshot. Before halting on failure, print a detailed diagnostic report including the mean displacement, U_rms, dt_snap, and the ratio `U_rms * dt_snap`. Ensure the displacement is less than `0.3 * 2π`.",
+                "Compute the Velocity Autocorrelation Function (VACF) for short lags and verify that `C_vv(τ=1) > 0.3`. Report the decorrelation time.",
+                "Confirm the inverse cascade by plotting the energy spectrum `E(k)` at times corresponding to 10%, 30%, 60%, and 100% of `T_prod`.",
+                "Plot the peak wavenumber `k_peak` as a function of time using the `diagnostics.npy` data to visualize its drift towards smaller values.",
+                "Save all generated plots to disk."
+            ],
+            "sub_task": "Simulation Data Verification and Inverse Cascade Confirmation",
             "sub_task_agent": "engineer"
         },
         {
             "bullet_points": [
-                "Define overlapping temporal windows of width `W = 8 * T_L` and step size `ΔW = 2 * T_L`, using the initial `T_L` value from `sim_params.json`.",
-                "Iterate through each time window. For each window, check if it contains at least 50 tracer snapshots; if not, skip it and print a warning.",
-                "For each valid window:",
-                "Calculate tracer displacements for lags `τ = {0.5, 1, 2} * T_L`.",
-                "Estimate `α` using the McCulloch quantile method, implemented by calculating `ν_α = (q95 - q5) / (q75 - q25)` and interpolating from a pre-defined McCulloch (1986) lookup table.",
-                "Estimate `α` using the Hill estimator with the top `k = max(10, int(0.05 * N_displacements))` order statistics.",
-                "Compute the Mean Squared Displacement (MSD) and fit a power law to find the anomalous exponent `γ`.",
-                "Compute the VACF and fit an algebraic decay to find the exponent `ν`.",
-                "Calculate the average `k_peak` and `d_vv` within the window from the diagnostics data.",
-                "Print the results for each window (window center time, `α_McCulloch`, `α_Hill`, `γ`, `ν`, `k_peak`, `d_vv`) in a clear tabular format.",
-                "Store the complete calculated time series into a single `.npz` file for the next step."
+                "Implement the non-stationarity analysis as described in \"Analysis Tasks: Task 2\".",
+                "Define overlapping temporal windows of width `W = 8 * T_L` and step `ΔW = 2 * T_L`.",
+                "For each window, calculate scalar tracer displacements (x and y components separately) at lags `τ = {0.5, 1, 2} * T_L`.",
+                "For the McCulloch quantile method, compute the five quantiles (p5, p25, p50, p75, p95) from the empirical distribution of scalar displacements. Calculate the ratio `ν_α = (q95 − q5)/(q75 − q25)` for each lag, and report the final `α(t)` for the window as the median of the estimates from the three lags.",
+                "For the Hill estimator, use the top `k` order statistics where `k` is the index of the 95th percentile of the sorted absolute displacement magnitudes. Save a diagnostic Hill plot (`α_Hill` vs. `k`) for each window to verify estimate stability.",
+                "Calculate the MSD exponent `γ(t)` and the VACF decay exponent `ν(t)` for each window.",
+                "Extract `d_vv(t)` and `k_peak(t)` from the diagnostics data, averaged over each window.",
+                "Perform Augmented Dickey-Fuller (ADF) and KPSS tests on the resulting `α(t)` time series to formally test for stationarity. Report the test statistics and p-values.",
+                "Generate a plot of `α(t)` versus `k_peak(t)/k_box` and fit the data to the functional form `α = a + b * (k_peak/k_box)^c`.",
+                "Save the computed time series (`α(t)`, `γ(t)`, etc.) and all plots to disk."
             ],
-            "sub_task": "Non-Stationarity Analysis: Time-Windowed Statistics Computation",
-            "sub_task_agent": "engineer"
-        },
-        {
-            "bullet_points": [
-                "Load the time series data (`α(t)`, `γ(t)`, `ν(t)`, `k_peak(t)`, `d_vv(t)`) generated in the previous step.",
-                "For each of the five time series, perform both Augmented Dickey-Fuller (ADF) and Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests.",
-                "Print the results for each series, including the ADF statistic, ADF p-value, KPSS statistic, KPSS p-value, and a plain-language interpretation of the combined test outcomes (e.g., \"α(t) appears non-stationary\").",
-                "Generate a multi-panel plot showing the temporal evolution of `α(t)`, `γ(t)`, `ν(t)`, and `k_peak(t)`.",
-                "Create a plot of `α(t)` versus the normalized peak wavenumber `k_peak(t)/k_box`.",
-                "Fit the relationship `α = a + b * (k_peak/k_box)^c` to the data and print the fitted parameters `a`, `b`, and `c`.",
-                "Save all generated plots to the output directory."
-            ],
-            "sub_task": "Non-Stationarity Analysis: Stationarity Tests and Visualization",
+            "sub_task": "Non-Stationarity Analysis of Tracer Statistics",
             "sub_task_agent": "engineer"
         },
         {
             "bullet_points": [
                 "Load the coarsened `velocity_snapshots.npy` data.",
-                "Select the 'sym6' wavelet and perform a 2D DWT on each velocity snapshot up to level `J=6`.",
-                "For each wavelet level `j`, calculate the wavelet energy time series.",
-                "Compute the temporal autocorrelation of the wavelet energy and integrate it to estimate the eddy lifetime `T_eddy(j)`. Print the computed `T_eddy(j)` for each level `j=1...6`.",
-                "For each `j_min ∈ {1, 2, 3, 4}`, reconstruct the filtered velocity fields `ũ_j` by retaining only scales `j >= j_min`. Ensure the reconstructed fields retain the full temporal dimension (`N_vel_snaps`).",
-                "Before saving, print the estimated size in MB of each filtered velocity field array and confirm the total storage is manageable.",
-                "Save the calculated eddy lifetimes `T_eddy(j)` and each reconstructed, filtered velocity field `ũ_j` as a separate memory-mapped `.npy` file."
+                "Select and justify a wavelet basis suitable for periodic domains (e.g., Symlets 'sym6').",
+                "Decompose each 2D velocity snapshot using a 2D Discrete Wavelet Transform (DWT) up to level J=6.",
+                "For each scale `j`, calculate the eddy lifetime `T_eddy(j)`. This involves computing the temporal autocorrelation of wavelet energy `C_E(τ, j)` by averaging over all 256x256 spatial locations, and then integrating the result up to a maximum lag of `min(T_prod/4, 50 * dt_vel)`.",
+                "For each scale filter `j_min` in {1, 2, 3, 4}, estimate the storage cost of saving the fully reconstructed filtered velocity fields. If the total exceeds 10 GB, save only the wavelet coefficient arrays to disk. Otherwise, save the reconstructed fields.",
+                "Save the calculated eddy lifetimes `T_eddy(j)` and the chosen velocity representation (reconstructed fields or coefficients) to disk."
             ],
             "sub_task": "Wavelet Decomposition and Eddy Lifetime Calculation",
-            "sub_task_agent": "engineer",
-            "code_execution_timeout": 7200
-        },
-        {
-            "bullet_points": [
-                "Load the initial tracer positions and the filtered velocity fields `ũ_j` saved in the previous step.",
-                "Implement a tracer advection routine using RK4 integration. For velocity lookups at intermediate RK4 sub-steps, use linear temporal interpolation between consecutive saved velocity snapshots.",
-                "Print the effective advection time step and the number of RK4 sub-steps used per velocity snapshot interval (`Δt_vel`).",
-                "For each filtered field corresponding to `j_min ∈ {1, 2, 3, 4}`, re-advect the `N_tracers` particles through the entire time series.",
-                "Save the full trajectories for the tracers in each of the filtered fields to separate `.npy` files."
-            ],
-            "sub_task": "Tracer Re-advection in Wavelet-Filtered Velocity Fields",
-            "sub_task_agent": "engineer",
-            "code_execution_timeout": 7200
-        },
-        {
-            "bullet_points": [
-                "For each set of re-advected tracer trajectories from the previous step:",
-                "Calculate tracer displacements and compute the displacement PDF.",
-                "Estimate the Lévy stability index `α(j)` using the McCulloch and Hill estimators.",
-                "Calculate the MSD and fit for the anomalous exponent `γ_MSD(j)`.",
-                "Calculate the VACF and fit for the decay exponent `ν_VACF(j)`.",
-                "Generate a single multi-panel figure showing the displacement PDF (on a log-log scale) for each filtered scale `j`, with the tail of the fitted Lévy-stable distribution overlaid for visual comparison.",
-                "Compile the results (`α(j)`, `γ(j)`, `ν(j)`) and the previously computed `T_eddy(j)` values into a single `.npz` file."
-            ],
-            "sub_task": "Statistical Analysis and Visualization of Re-advected Tracers",
             "sub_task_agent": "engineer"
         },
         {
             "bullet_points": [
-                "Load the aggregated results file from the previous step.",
-                "Create a plot of the Lévy index `α(j)` as a function of the eddy lifetime `T_eddy(j)`.",
-                "Test the CTRW prediction by fitting the model `β = A * T_eddy^δ`. Print the fitted prefactor `A`, exponent `δ`, and the R² of the fit.",
-                "Use the fitted `β` to predict `α_pred = 1 + β/(2−β)`. Print a comparison table of measured `α(j)` vs. predicted `α_pred(j)`.",
-                "On the plot of `α(j)` vs `T_eddy(j)`, overlay the fitted CTRW model curve.",
-                "Save the plot to the output directory."
+                "Load the initial tracer positions and the filtered velocity data (reconstructed fields or coefficients) from the previous step. If loading coefficients, reconstruct fields on-the-fly.",
+                "Implement the re-advection loop using vectorized GPU operations (CUDA) to process all 5000 tracers simultaneously for maximum efficiency.",
+                "Before starting the advection for each filtered field `ũ_j`, estimate and print the expected wall-clock time for the computation.",
+                "For each filtered field, re-advect the tracers for the full production run duration using an RK4 integrator.",
+                "For each resulting trajectory dataset, compute the Lévy stability index `α(j)`, the MSD exponent `γ_MSD(j)`, and the VACF decay exponent `ν_VACF(j)`.",
+                "Test the CTRW prediction by plotting `α(j)` vs. `T_eddy(j)`. Fit the relationship to test the prediction `α = 1 + β/(2−β)` where `β` is a function of `T_eddy`. Report the fitted functional form.",
+                "Save the computed scale-dependent statistics and the plot to disk."
             ],
-            "sub_task": "Wavelet Analysis Visualization and CTRW Model Testing",
+            "sub_task": "Tracer Re-advection in Filtered Fields and Scale-Dependent Statistics",
             "sub_task_agent": "engineer"
         },
         {
             "bullet_points": [
-                "Load the results from the non-stationarity analysis (Step 2) and the wavelet analysis (Step 6).",
-                "Determine the dominant wavelet scale `j_peak(t)` corresponding to the peak wavenumber `k_peak(t)` for each time window.",
-                "Create a comparative plot showing the time-windowed `α(t)` against the scale-dependent `α(j_peak(t))`.",
-                "Generate a 2D map (e.g., using `pcolormesh`) of the Lévy index `α` as a function of eddy lifetime `T_eddy` and condensation state `k_peak/k_box`, interpolating the discrete data points onto a grid.",
-                "Save the generated plots to the output directory."
+                "Load the results from the non-stationarity analysis (Step 3) and the wavelet-scale analysis (Step 5).",
+                "For each time window `t`, identify the dominant wavelet scale `j_peak(t)` corresponding to the mean `k_peak(t)` in that window.",
+                "Create a comparative plot showing `α(t)` from the windowed analysis alongside `α(j_peak(t))` from the wavelet analysis.",
+                "Generate a 2D map of the Lévy index `α` as a function of eddy lifetime `T_eddy` and spectral condensation state `k_peak/k_box`, interpolating the data from both analyses onto a 2D grid.",
+                "Save all generated plots to disk."
             ],
-            "sub_task": "Synthesis of Non-Stationary and Wavelet-Scale Analyses",
+            "sub_task": "Synthesis of Temporal and Scale-Based Analyses",
             "sub_task_agent": "engineer"
         },
         {
             "bullet_points": [
-                "Synthesize all quantitative results, interpretations, and plots into a comprehensive \"Results\" section.",
-                "Explicitly quote numerical values printed to the console in previous steps, including: mean displacement, VACF at lag 1, `T_eddy(j)` for each scale, ADF/KPSS p-values, and fitted model parameters (`a,b,c` for `α(k_peak)` and `A, δ` for the CTRW model).",
-                "Report on the initial data verification, confirming snapshot quality (quoting the mean displacement) and the inverse cascade (quoting initial and final `k_peak`).",
-                "Detail the non-stationarity analysis, discussing the temporal evolution of all five metrics. State the definitive conclusion from the ADF/KPSS tests regarding the stationarity of each series.",
-                "Describe the wavelet analysis results, presenting the relationship between `α(j)` and `T_eddy(j)`. Quantitatively evaluate the CTRW prediction by comparing measured and predicted `α` values.",
-                "Integrate the two analyses by discussing the `α(t)` vs `α(j_peak(t))` comparison and the 2D map.",
-                "Conclude by explicitly stating whether each of the four key physical predictions from the problem description was confirmed or refuted by the data, referencing the specific numerical evidence."
+                "Write a comprehensive \"Results\" section suitable for a scientific publication.",
+                "Begin by summarizing the simulation verification, confirming data quality and the inverse cascade (referencing plots from Step 2).",
+                "Detail the findings of the non-stationarity analysis, discussing the evolution of `α(t)`, `γ(t)`, and other parameters. Report and interpret the ADF/KPSS test results. Discuss the relationship between `α` and `k_peak` (referencing plots from Step 3).",
+                "Include a dedicated subsection on estimator robustness. Quantitatively compare the McCulloch and Hill `α` estimates (mean difference, std dev of difference) and flag any windows where they disagree by more than 0.2, discussing the implications for statistical convergence.",
+                "Describe the results of the wavelet-based analysis, presenting the scaling of `T_eddy(j)` with scale `j`. Evaluate the plot of `α(j)` vs. `T_eddy(j)` in the context of CTRW theory (referencing plots from Step 5).",
+                "Synthesize the two main analyses, interpreting the comparison between `α(t)` and `α(j_peak(t))` and the 2D map of `α` (referencing plots from Step 6).",
+                "Conclude with a definitive statement on whether the Lévy flight statistics are stationary or evolve with the inverse cascade, supported by the full body of evidence."
             ],
-            "sub_task": "Final Results Report",
+            "sub_task": "Final Report on Results and Interpretation",
             "sub_task_agent": "researcher"
         }
     ]
