@@ -1,0 +1,237 @@
+
+###### PROMPT BEGINS ########
+Human: You are provided with:
+- a description of the data
+- an idea
+- research plan to carry out the idea.
+
+Your task is to provide suggestions on how to improve the plan.
+Take into account and potential feedback (if any).
+If the plan is already good enough, do not give suggestions to improve it. If this is not first iteration, you will also be provided with the previous research plan along with some feedback on it. If this is the case, take into account the feedback provided when designing the new research plan. It is good to have a detailed plan, but not to have an overly complicated plan. If you dont have suggestions, just say that you dont have further suggestions. The idea should remain the same. No need to add code to the research plan, as another agent will write code given the research plan.
+
+Data description:
+# Lévy Flights in 2D Turbulence: Wavelet-Filtered Tracer Advection and Non-Stationary Analysis
+
+## Research Objectives
+
+This project extends a prior study (levy_flights_2dns_v1) on anomalous diffusion of passive tracers in 2D turbulence. Two specific open questions are addressed:
+
+1. **Wavelet-based eddy-lifetime scaling of Lévy flights**: Decompose the 2D velocity field into wavelet scales, advect tracers in each filtered field, vary eddy lifetime by retaining different scale ranges, and test whether the Lévy index α scales predictably with the characteristic eddy lifetime T_eddy(j) as predicted by CTRW theory.
+
+2. **Non-stationarity analysis across multiple time windows**: The prior project's results were derived from a single time slice or short integration window. This study runs a long-duration DNS (T >> 50 T_L), divides the run into overlapping temporal windows, and measures how α(t), the MSD scaling exponent γ(t), the VACF decay exponent ν(t), the mean inter-vortex distance d_vv(t), and the energy condensation wavenumber k_peak(t) evolve over time. This directly tests whether the previously reported α ≈ 1.4 is stationary or a transient.
+
+## Simulation Design
+
+### Solver
+GPU-accelerated pseudo-spectral 2D Navier-Stokes in vorticity-streamfunction form:
+    ∂ω/∂t + (u · ∇)ω = ν_h (-1)^p ∇^(2p) ω + f
+Domain: [0, 2π] × [0, 2π], doubly periodic. Resolution: N = 512 × 512 (de-aliased with 2/3 rule).
+Time integration: RK4 with adaptive dt, CFL < 0.4.
+Forcing: stochastic white-in-time at k ∈ [1, 3], constant energy injection rate ε_inj = 0.1.
+Dissipation: hyperviscosity ν_h = 1e-17, p = 4 (8th-order). No large-scale drag — essential for inverse cascade.
+Use PyTorch (device='cuda') for spectral transforms.
+
+### Run duration
+- Spinup: T_spinup until T/T_L ≥ 8 (fully developed inverse cascade with large coherent vortices).
+- Production: continue for at least T_prod = 60 × T_L additional time units after spinup.
+- Save snapshots every Δt_save ≈ 0.05 T_L (adaptive to current T_L estimate), targeting ≥ 1000 snapshots over the production run.
+- This temporal density is critical for the non-stationarity analysis and for wavelet coefficient autocorrelation estimates.
+
+### Passive tracers
+- N_tracers = 5000 tracers seeded uniformly after spinup.
+- Advected by bilinear spectral interpolation at every saved timestep.
+- Periodic boundary conditions.
+
+## Output Files (ABSOLUTE PATHS — required by the engineer)
+
+All files written to `/home/node/work/projects/levy_flights_2dns_v2/data/`:
+
+### Primary simulation outputs:
+- `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_positions.npy`
+  Shape: (N_snapshots, N_tracers, 2), dtype float32. tracer_positions[t, i, :] = (x, y) ∈ [0, 2π].
+- `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_velocities.npy`
+  Shape: (N_snapshots, N_tracers, 2), dtype float32. Interpolated (u, v) at each tracer position.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/vorticity_snapshots.npy`
+  Shape: (N_snapshots, 256, 256), dtype float32. Coarsened vorticity field at each snapshot.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/velocity_snapshots.npy`
+  Shape: (N_snapshots, 2, 256, 256), dtype float32. Coarsened (u, v) velocity fields — required for wavelet decomposition.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/times.npy`
+  Shape: (N_snapshots,), dtype float64. Physical times of each snapshot.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/energy_spectrum.npy`
+  Shape: (N_snapshots, N//2), dtype float64. Azimuthally-averaged E(k, t).
+- `/home/node/work/projects/levy_flights_2dns_v2/data/diagnostics.npy`
+  Structured array: fields = (time, E_total, E_rms, omega_rms, T_L, k_peak, d_vv_estimate).
+  Shape: (N_snapshots,).
+- `/home/node/work/projects/levy_flights_2dns_v2/data/sim_params.json`
+  JSON: all simulation parameters (N, dt, nu_h, epsilon_inj, N_tracers, N_snapshots, T_L_estimate, etc.).
+
+## Analysis Tasks
+
+### Task 1: Verify inverse cascade
+
+Check E(k) ~ k^(-5/3) develops for k < k_f. Confirm energy condensation by tracking k_peak(t) shifting toward k=1 over the production run. Plot energy spectra at t = 0.1, 0.3, 0.6, 1.0 × T_prod.
+
+### Task 2: Non-stationarity analysis
+
+Define overlapping temporal windows of width W = 8 T_L, stepping by ΔW = 2 T_L, covering the full production run (yielding ~26 windows). For each window w:
+a. Compute displacement PDFs P(Δx, τ) at lags τ = {0.5, 1, 2} T_L. Fit Lévy-stable distribution → α_w.
+b. Compute MSD(τ) and fit power law → γ_w (anomalous exponent).
+c. Compute VACF C_vv(τ) and fit algebraic decay → ν_w.
+d. Compute mean inter-vortex distance d_vv(w) from vortex detection (Okubo-Weiss Λ < 0 criterion, connected-component labeling).
+e. Extract k_peak(w) from the energy spectrum peak.
+
+Output: time series α(t), γ(t), ν(t), d_vv(t), k_peak(t). Test stationarity via Augmented Dickey-Fuller test on each series. Plot α(t) vs k_peak(t)/k_box and fit α = a + b × (k_peak(t)/k_box)^c.
+
+### Task 3: Wavelet decomposition and eddy-lifetime scaling
+
+Use the saved `velocity_snapshots.npy` (shape N_snapshots × 2 × 256 × 256). The engineer should choose the wavelet basis appropriate for 2D spatial decomposition — recommended choices are Daubechies (db4, db6) or Symlets (sym6) for their compact support and orthogonality, or a 2D Morlet CWT if isotropic scale isolation is preferred. Justify the choice in the analysis output.
+
+Steps:
+a. Apply 2D wavelet decomposition to each velocity snapshot u(x,y,t) and v(x,y,t), obtaining wavelet coefficient arrays W_j(x,y,t) for levels j = 1, …, J (J ≈ 6–7 levels for 256² grid).
+b. Reconstruct filtered velocity fields ũ_j(x,y,t) retaining only levels j ≥ j_min for j_min ∈ {1, 2, 3, 4} (low j_min = all scales, high j_min = large scales only). This effectively sets the minimum eddy size to ~2^j_min × dx.
+c. For each filtered field ũ_j, compute the eddy lifetime T_eddy(j) as the integral timescale of the wavelet-coefficient temporal autocorrelation at scale j:
+   T_eddy(j) = ∫_0^∞ C_W(τ, j) dτ / C_W(0, j)
+   where C_W(τ, j) = ⟨W_j(x,y,t) W_j(x,y,t+τ)⟩_{x,y,t}.
+d. Re-advect (or re-interpolate) the 5000 saved tracers in each filtered field ũ_j using the saved tracer positions as initial conditions. Compute displacement statistics for each filtered field: α(j), γ_MSD(j), ν_VACF(j).
+e. Plot α(j) vs T_eddy(j) and test the CTRW prediction: if β ∝ T_eddy^δ, then α = 1 + β/(2-β) should give a monotonic curve. Fit α(j) = f(T_eddy(j)) and report the functional form and exponent.
+f. Report whether removing small-scale eddies (increasing j_min) increases or decreases α (i.e., does filtering toward large-scale structures enhance or suppress Lévy flights?).
+
+### Task 4: Synthesis
+
+Combine Tasks 2 and 3:
+- Do the time-windowed α(t) values from Task 2 agree with the wavelet-scale analysis from Task 3 at the dominant scale?
+- Plot a 2D map of α as a function of (T_eddy, condensation state k_peak/k_box).
+- State whether α is stationary or drifts with the spectral condensation state.
+
+## Key Physical Predictions to Test
+
+1. α decreases (heavier tails, more anomalous) as T_eddy increases — larger/longer-lived eddies produce more ballistic flights.
+2. α(t) drifts toward lower values as the inverse cascade develops (k_peak → k_box), i.e., the flow becomes more anomalous as vortices grow to box scale.
+3. The CTRW relation α = 1 + β/(2 − β) holds, with β(j) ∝ T_eddy(j)^δ.
+
+## Hardware
+
+- 64 vCPUs (AMD Ryzen Threadripper PRO 9995WX), 128 GB RAM
+- NVIDIA RTX PRO 6000 Blackwell Edition (96 GB VRAM), CUDA 13.0
+- PyTorch 2.12.0+cu130 — use device='cuda' for all spectral operations
+- Use torch.fft.rfft2 / irfft2 for spectral transforms
+- For wavelet decomposition: use PyWavelets (pywt) — already installed in the venv
+- Multiprocessing: limit to 8 CPU workers for post-processing; all heavy compute on GPU
+
+## Prior Results Context (for the engineer)
+
+From levy_flights_2dns_v1 Iteration 4 (best iteration):
+- α ≈ 1.4 ± 0.1, VACF decay ν ≈ 0.61–0.72
+- Two-channel ejection: vortex death (~2.6%) + strain stripping (~97.4%)
+- Jump length scaling L ~ d_vv^0.63 (but χ² test showed non-universality, p < 0.001)
+- CTRW kurtosis ratio ~0.4 and S6 ratio ~5.5 — model inconsistency
+
+From Iteration 5 (evaluator feedback):
+- Short simulation window → α = 2.0 (Gaussian), FTLE ridge density R = 0
+- Key lesson: need T >> 50 T_L and dense temporal sampling to resolve LCS and observe Lévy flights
+- Non-stationarity hypothesis: α may depend on spectral condensation state k_peak(t)/k_box
+
+
+Idea:
+**Title:** Eddy-Lifetime Dependence of Lévy Flights Modulated by Spectral Condensation in 2D Turbulence
+
+**Description:** This study examines how the Lévy index α is influenced by eddy lifetimes at different wavelet scales, and how this relationship is modulated by the spectral condensation state. Wavelet decomposition of `velocity_snapshots.npy` yields wavelet coefficients used to reconstruct filtered velocity fields, enabling calculation of eddy lifetimes T_eddy(j) at each scale. Time-resolved Lévy indices α(t) are computed from `tracer_positions.npy` within overlapping windows. The relationship between α and T_eddy is assessed by fitting α(j) = f(T_eddy(j)) at different stages of spectral condensation, as characterized by `k_peak(t)` from `diagnostics.npy`. The hypothesis is that the relationship between α and T_eddy changes as `k_peak(t)` shifts towards lower wavenumbers.
+\
+
+Research plan:
+1.  **Data Loading and Preparation:**
+
+    a.  Load the simulation data from the specified absolute paths: `tracer_positions.npy`, `tracer_velocities.npy`, `vorticity_snapshots.npy`, `velocity_snapshots.npy`, `times.npy`, `energy_spectrum.npy`, `diagnostics.npy`, and `sim_params.json`.
+    b.  Extract relevant simulation parameters from `sim_params.json`, including `N`, `dt`, `nu_h`, `epsilon_inj`, `N_tracers`, `N_snapshots`, and the initial `T_L_estimate`.
+    c.  Verify the shape and data types of each loaded array to ensure consistency with the data description.
+    d.  Calculate `k_box = 1` (fundamental wavenumber).
+
+2.  **Inverse Cascade Verification:**
+
+    a.  Load `energy_spectrum.npy`.
+    b.  Define target times for plotting the energy spectra: `t_targets = [0.1, 0.3, 0.6, 1.0] * T_prod`, where `T_prod` is the total production time (can be inferred from `times.npy`).
+    c.  Find the indices in `times.npy` that are closest to the target times.
+    d.  Plot the energy spectra E(k) at the selected time indices. Overlay a line representing E(k) ~ k^(-5/3) for comparison.
+    e.  Load `diagnostics.npy` and extract `k_peak(t)`. Plot `k_peak(t)` as a function of time to visualize the energy condensation process. Confirm that `k_peak(t)` shifts towards `k=1` over the production run.
+
+3.  **Non-Stationarity Analysis:**
+
+    a.  Define the window width `W = 8 * T_L_estimate` and the step size `ΔW = 2 * T_L_estimate`.
+    b.  Create a series of overlapping temporal windows covering the full production run. The start times of the windows will be `t_start = np.arange(0, times[-1] - W, ΔW)`. The number of windows will be `len(t_start)`.
+    c.  For each window `w`:
+        i.   Find the indices in `times.npy` that fall within the current window.
+        ii.  Extract the tracer positions within the window: `tracer_positions_w = tracer_positions[indices, :, :]`.
+        iii. Compute displacement PDFs P(Δx, τ) at lags τ = {0.5, 1, 2} * `T_L_estimate`. Use histograms to estimate the PDFs.
+        iv.  Fit a Lévy-stable distribution to each P(Δx, τ) to obtain the Lévy index α_w for each τ. Average the α_w values across the three τ values to get a single α_w for the window.
+        v.   Compute the Mean Squared Displacement (MSD) as a function of lag time τ within the window. Fit a power law to MSD(τ) to obtain the anomalous exponent γ_w.
+        vi.  Compute the Velocity Autocorrelation Function (VACF) C_vv(τ) within the window. Fit an algebraic decay to C_vv(τ) to obtain the decay exponent ν_w.
+        vii. Extract the mean inter-vortex distance `d_vv(w)` from the `diagnostics.npy` array for the current window by averaging the values within the window.
+        viii. Extract the energy condensation wavenumber `k_peak(w)` from the `diagnostics.npy` array for the current window by averaging the values within the window.
+    d.  Create time series of α(t), γ(t), ν(t), d_vv(t), and k_peak(t) by assigning the window values to the center time of each window.
+    e.  Test the stationarity of each time series using the Augmented Dickey-Fuller test.
+    f.  Plot α(t) vs k_peak(t)/k_box and fit the relationship α = a + b * (k_peak(t)/k_box)^c. Report the fitted parameters a, b, and c.
+
+4.  **Wavelet Decomposition and Eddy-Lifetime Scaling:**
+
+    a.  Choose a wavelet basis for 2D spatial decomposition. Recommended choices are Daubechies (db4, db6) or Symlets (sym6). Justify the choice in the analysis output.
+    b.  Apply 2D wavelet decomposition to each velocity snapshot u(x,y,t) and v(x,y,t) from `velocity_snapshots.npy` using the chosen wavelet basis. Obtain wavelet coefficient arrays W_j(x,y,t) for levels j = 1, …, J (J ≈ 6–7 levels for 256² grid).
+    c.  Reconstruct filtered velocity fields ũ_j(x,y,t) retaining only levels j ≥ j_min for j_min ∈ {1, 2, 3, 4}.
+    d.  For each filtered field ũ_j:
+        i.   Compute the eddy lifetime T_eddy(j) as the integral timescale of the wavelet-coefficient temporal autocorrelation at scale j:
+             T_eddy(j) = ∫_0^∞ C_W(τ, j) dτ / C_W(0, j)
+             where C_W(τ, j) = ⟨W_j(x,y,t) W_j(x,y,t+τ)⟩_{x,y,t}.  Estimate the integral using a sufficiently long lag time τ_max and numerical integration (e.g., trapezoidal rule).
+        ii.  Re-advect the 5000 saved tracers in each filtered field ũ_j using the saved tracer positions as initial conditions. Use the saved tracer velocities for interpolation.
+        iii. Compute displacement statistics for each filtered field: α(j), γ_MSD(j), ν_VACF(j).
+    e.  Plot α(j) vs T_eddy(j) and test the CTRW prediction. Fit α(j) = f(T_eddy(j)) and report the functional form and exponent.
+    f.  Report whether removing small-scale eddies (increasing j_min) increases or decreases α.
+
+5.  **Synthesis:**
+
+    a.  Compare the time-windowed α(t) values from Task 2 with the wavelet-scale analysis from Task 3 at the dominant scale (the scale corresponding to `k_peak(t)`).
+    b.  Create a 2D map of α as a function of (T_eddy, condensation state k_peak/k_box). Interpolate the α(j) values from Task 3 and the α(t) values from Task 2 onto a grid of (T_eddy, k_peak/k_box) values.
+    c.  State whether α is stationary or drifts with the spectral condensation state based on the results of the Augmented Dickey-Fuller test and the 2D map.
+
+\
+
+Previous research plan:
+None
+
+Feedback on previous research plan:
+None
+
+
+Respond in this format:
+
+\\begin{SUGGESTIONS}
+<SUGGESTIONS>
+\\end{SUGGESTIONS}
+
+In <SUGGESTIONS> put the suggestions to improve the plan.
+
+###### PROMPT ENDS ########
+
+###### RESPONSE [model: gemini-2.0-flash] ########
+\begin{SUGGESTIONS}
+The research plan is well-structured and comprehensive. Here are a few suggestions for improvement:
+
+*   **Task 2 (Non-Stationarity Analysis):**
+    *   **Statistical Significance:** When fitting Lévy-stable distributions and power laws, consider reporting confidence intervals or standard errors for the fitted parameters (α_w, γ_w, ν_w). This will provide a measure of the uncertainty in these estimates.
+    *   **Alternative Stationarity Tests:** While the Augmented Dickey-Fuller test is a good starting point, consider exploring other stationarity tests, such as the Kwiatkowski-Phillips-Schmidt-Shin (KPSS) test, to provide a more robust assessment of stationarity.
+    *   **Justification of Window Parameters:** Provide a brief justification for the choice of window width `W = 8 * T_L_estimate` and step size `ΔW = 2 * T_L_estimate`. How do these choices balance the need for temporal resolution with the need for sufficient data within each window to obtain reliable statistics?
+
+*   **Task 3 (Wavelet Decomposition and Eddy-Lifetime Scaling):**
+    *   **Wavelet Choice Justification:** Elaborate on the criteria for choosing a specific wavelet basis. Consider factors such as the smoothness of the velocity field, the desired level of scale separation, and computational efficiency. Mentioning the trade-offs between different wavelet families would strengthen the justification.
+    *   **Boundary Effects:** Acknowledge and address potential boundary effects in the wavelet decomposition, especially given the periodic boundary conditions of the simulation. Discuss strategies for mitigating these effects, such as padding or tapering the velocity fields.
+    *   **Eddy Lifetime Calculation:** Provide more detail on how the integral timescale T_eddy(j) will be estimated numerically. Specify the method for choosing the upper limit of integration τ_max and the numerical integration scheme (e.g., trapezoidal rule). Also, consider the impact of noise on the autocorrelation function and potential methods for smoothing or filtering the autocorrelation function before integration.
+    *   **Tracer Re-Advection:** Clarify how the re-advection of tracers in the filtered velocity fields will be performed. Will the same time step `dt` be used as in the original simulation? Will the interpolation method be the same (bilinear spectral interpolation)?
+
+*   **Task 4 (Synthesis):**
+    *   **Dominant Scale Definition:** Provide a precise definition of what constitutes the "dominant scale" in the context of comparing α(t) from Task 2 with the wavelet-scale analysis from Task 3. Will it be simply the scale closest to `k_peak(t)`, or will a more sophisticated approach be used?
+    *   **Interpolation Method:** Specify the interpolation method used to create the 2D map of α as a function of (T_eddy, k_peak/k_box). The choice of interpolation method can affect the appearance and interpretation of the map.
+
+*   **General:**
+    *   **Error Handling:** Briefly mention error handling strategies, such as checking for NaN or Inf values in the data and implementing appropriate handling mechanisms.
+    *   **Computational Resources:** While the hardware is specified, it would be useful to estimate the expected runtime for each task. This can help in planning and resource allocation.
+\end{SUGGESTIONS}
+
+
