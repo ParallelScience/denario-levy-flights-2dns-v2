@@ -1,0 +1,9 @@
+{
+    "N": 512,
+    "dt": 0.001,
+    "nu_h": 1e-17,
+    "epsilon_inj": 0.1,
+    "N_tracers": 5000,
+    "N_snapshots": 1000,
+    "T_L_estimate": 5.0
+}

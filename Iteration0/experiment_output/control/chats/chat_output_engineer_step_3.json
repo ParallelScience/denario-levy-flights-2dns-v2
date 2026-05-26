@@ -1,0 +1,324 @@
+[
+  {
+    "name": "control_starter",
+    "content": "",
+    "timestamp": "2026-05-26 17:44:02",
+    "cost": {
+      "Agent": [
+        "control_starter"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        5385
+      ],
+      "Completion Tokens": [
+        5
+      ],
+      "Total Tokens": [
+        5390
+      ]
+    }
+  },
+  {
+    "name": "_Group_Tool_Executor",
+    "content": "\n**Step number:** 3 out of 9.\n\n**Sub-task:** Non-Stationarity Analysis: Time-Windowed Computations\n\n**Agent in charge of sub-task:** `engineer`\n\n**Instructions:**\n\n- Load the prepared data from Step 1.\n- Define and iterate through overlapping temporal windows (width W = 8 T_L, step \u0394W = 2 T_L).\n- For each window, perform the following calculations:\n- Compute tracer displacements for lags \u03c4 = {0.5, 1, 2} T_L.\n- For each lag \u03c4, fit a L\u00e9vy-stable distribution to the displacement PDF to get \u03b1_w(\u03c4). Implement robust error handling to assign NaN and continue if a fit fails to converge.\n- Calculate the window's final L\u00e9vy index \u03b1_w as the mean of the per-lag values, and its uncertainty as the standard deviation.\n- Calculate the Mean Squared Displacement (MSD) to find the anomalous exponent \u03b3_w, and the Velocity Autocorrelation Function (VACF) to find the decay exponent \u03bd_w.\n- Average the `d_vv` and `k_peak` values within the window from the diagnostics data.\n- Store the calculated time series, including per-lag \u03b1 values, the window-averaged \u03b1(t) with its uncertainty, \u03b3(t), \u03bd(t), d_vv(t), and k_peak(t), in a structured format.\n- Save the resulting time series data to a `.npz` file.\n\n**Status:** in progress \u23f3\n",
+    "timestamp": "2026-05-26 17:44:02",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "engineer",
+    "content": "**Code Explanation:**\n\nThis script performs a non-stationary analysis of tracer statistics in 2D turbulence by examining overlapping temporal windows. It loads the pre-processed simulation data from Step 1, including tracer positions, velocities, and diagnostic quantities.\n\nThe core of the script iterates through a series of time windows, each with a width of 8 large-eddy turnover times (T_L) and overlapping by 2 T_L. For each window, it calculates several key statistical metrics:\n\n1.  **L\u00e9vy-stable index (\u03b1):** It computes tracer displacements for time lags of 0.5, 1.0, and 2.0 T_L. A L\u00e9vy-stable distribution is fitted to the probability distribution of these displacements using `scipy.stats.levy_stable.fit`. The resulting \u03b1 values, which characterize the heaviness of the distribution's tails, are averaged across the lags to produce a single value for the window. Robust error handling is included to manage cases where the fitting algorithm fails to converge.\n\n2.  **Anomalous diffusion exponent (\u03b3):** The Mean Squared Displacement (MSD) is calculated as a function of time lag within the window. A power law is fitted to the MSD curve on a log-log scale to determine the exponent \u03b3, which quantifies the deviation from standard Brownian motion (where \u03b3=1).\n\n3.  **Velocity Autocorrelation Function (VACF) decay exponent (\u03bd):** The VACF is computed, and an algebraic decay is fitted to its tail (for lags greater than T_L) on a log-log scale to find the exponent \u03bd. This exponent describes how quickly the fluid \"forgets\" its velocity.\n\n4.  **Flow diagnostics:** The mean inter-vortex distance (`d_vv`) and the peak energy wavenumber (`k_peak`) are averaged over the time window using the pre-computed diagnostics data.\n\nThe script stores these computed time series\u2014\u03b1(t), \u03b3(t), \u03bd(t), d_vv(t), and k_peak(t)\u2014along with their corresponding window center times. Finally, all results are saved into a single compressed NumPy file (`non_stationarity_timeseries.npz`) for use in subsequent analysis steps. A progress bar is used to monitor the computation over the windows, as the fitting procedures can be time-consuming.\n\n**Python Code:**\n```python\nimport os\nimport numpy as np\nfrom scipy.stats import levy_stable\nfrom scipy.optimize import curve_fit\nfrom tqdm import tqdm\n\ndef calculate_displacements(positions, lag):\n    \"\"\"\n    Calculates tracer displacements with periodic boundary conditions.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (T, N, 2).\n        lag (int): The time lag in number of steps.\n\n    Returns:\n        np.ndarray: Displacement array of shape (T-lag, N, 2).\n    \"\"\"\n    pos1 = positions[:-lag]\n    pos2 = positions[lag:]\n    delta = pos2 - pos1\n    delta[delta > np.pi] -= 2 * np.pi\n    delta[delta < -np.pi] += 2 * np.pi\n    return delta\n\ndef fit_alpha_for_window(window_pos, lags_steps):\n    \"\"\"\n    Fits the L\u00e9vy-stable alpha parameter for a given window and lags.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        lags_steps (np.ndarray): Array of lags in integer steps.\n\n    Returns:\n        tuple: A tuple containing:\n            - float: The mean alpha value.\n            - float: The standard deviation of alpha values.\n            - np.ndarray: The alpha values for each lag.\n    \"\"\"\n    alphas = []\n    for lag in lags_steps:\n        if lag >= window_pos.shape[0] or lag == 0:\n            alphas.append(np.nan)\n            continue\n        \n        delta_pos = calculate_displacements(window_pos, lag)\n        displacements_1d = delta_pos.flatten()\n        \n        # Filter out any potential NaNs or Infs from input\n        displacements_1d = displacements_1d[np.isfinite(displacements_1d)]\n        \n        if displacements_1d.size < 100: # Not enough data to fit\n            alphas.append(np.nan)\n            continue\n\n        try:\n            # Use a smaller sample for fitting if the array is very large to speed up\n            sample_size = min(len(displacements_1d), 200000)\n            sample = np.random.choice(displacements_1d, sample_size, replace=False)\n            alpha, _, _, _ = levy_stable.fit(sample)\n            # Constrain alpha to its valid range\n            if 0 < alpha <= 2:\n                alphas.append(alpha)\n            else:\n                alphas.append(np.nan)\n        except (RuntimeError, ValueError):\n            alphas.append(np.nan)\n            \n    return np.nanmean(alphas), np.nanstd(alphas), np.array(alphas)\n\ndef fit_gamma_for_window(window_pos, dt):\n    \"\"\"\n    Fits the MSD exponent gamma for a given window.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        dt (float): The average time step.\n\n    Returns:\n        float: The fitted gamma exponent.\n    \"\"\"\n    T_win = window_pos.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n        \n    lags = np.arange(1, max_lag)\n    msd = []\n    for lag in lags:\n        delta_pos = calculate_displacements(window_pos, lag)\n        msd.append(np.mean(np.sum(delta_pos**2, axis=-1)))\n    \n    lags_phys = lags * dt\n    msd = np.array(msd)\n    \n    valid = msd > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    try:\n        gamma, _ = np.polyfit(np.log(lags_phys[valid]), np.log(msd[valid]), 1)\n    except (np.linalg.LinAlgError, ValueError):\n        gamma = np.nan\n        \n    return gamma\n\ndef fit_nu_for_window(window_vel, dt, T_L):\n    \"\"\"\n    Fits the VACF decay exponent nu for a given window.\n\n    Args:\n        window_vel (np.ndarray): Tracer velocities within the window.\n        dt (float): The average time step.\n        T_L (float): The large-eddy turnover time.\n\n    Returns:\n        float: The fitted nu exponent.\n    \"\"\"\n    T_win = window_vel.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n\n    lags = np.arange(1, max_lag)\n    vacf = []\n    v_sq_mean = np.mean(np.sum(window_vel**2, axis=-1))\n    if v_sq_mean == 0:\n        return np.nan\n\n    for lag in lags:\n        v1 = window_vel[:-lag]\n        v2 = window_vel[lag:]\n        vacf.append(np.mean(np.sum(v1 * v2, axis=-1)) / v_sq_mean)\n    \n    lags_phys = lags * dt\n    vacf = np.array(vacf)\n    \n    fit_start_idx = np.argmin(np.abs(lags_phys - T_L))\n    if fit_start_idx >= len(lags_phys) - 2:\n        return np.nan\n        \n    valid = vacf[fit_start_idx:] > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    log_tau = np.log(lags_phys[fit_start_idx:][valid])\n    log_vacf = np.log(vacf[fit_start_idx:][valid])\n    \n    try:\n        neg_nu, _ = np.polyfit(log_tau, log_vacf, 1)\n    except (np.linalg.LinAlgError, ValueError):\n        neg_nu = np.nan\n        \n    return -neg_nu\n\ndef compute_non_stationarity_timeseries(data_path, output_path):\n    \"\"\"\n    Computes time series of statistical properties over sliding windows.\n\n    Args:\n        data_path (str): Path to the prepared data .npz file.\n        output_path (str): Path to save the resulting timeseries .npz file.\n    \"\"\"\n    print(\"Loading data from \" + data_path)\n    data = np.load(data_path)\n    tracer_pos = data['tracer_positions']\n    tracer_vel = data['tracer_velocities']\n    times = data['times']\n    diagnostics = data['diagnostics']\n    T_L_estimate = data['T_L_estimate'].item()\n\n    W = 8 * T_L_estimate\n    dW = 2 * T_L_estimate\n    dt_avg = np.mean(np.diff(times))\n    \n    lags_alpha_phys = np.array([0.5, 1.0, 2.0]) * T_L_estimate\n    lags_alpha_steps = np.round(lags_alpha_phys / dt_avg).astype(int)\n\n    window_starts = np.arange(times[0], times[-1] - W, dW)\n    results = []\n\n    print(\"Starting non-stationarity analysis over \" + str(len(window_starts)) + \" windows...\")\n    for t_start in tqdm(window_starts):\n        t_end = t_start + W\n        idx_start = np.searchsorted(times, t_start)\n        idx_end = np.searchsorted(times, t_end)\n        \n        if (idx_end - idx_start) < (max(lags_alpha_steps) + 5):\n            continue\n\n        window_pos = tracer_pos[idx_start:idx_end]\n        window_vel = tracer_vel[idx_start:idx_end]\n        \n        diag_mask = (diagnostics['time'] >= t_start) & (diagnostics['time'] < t_end)\n        window_diag = diagnostics[diag_mask]\n\n        alpha_mean, alpha_std, alphas_per_lag = fit_alpha_for_window(window_pos, lags_alpha_steps)\n        gamma = fit_gamma_for_window(window_pos, dt_avg)\n        nu = fit_nu_for_window(window_vel, dt_avg, T_L_estimate)\n        \n        d_vv_mean = np.mean(window_diag['d_vv_estimate']) if window_diag.size > 0 else np.nan\n        k_peak_mean = np.mean(window_diag['k_peak']) if window_diag.size > 0 else np.nan\n\n        results.append({\n            't_center': t_start + W / 2.0,\n            'alpha': alpha_mean,\n            'alpha_std': alpha_std,\n            'alphas_per_lag': alphas_per_lag,\n            'gamma': gamma,\n            'nu': nu,\n            'd_vv': d_vv_mean,\n            'k_peak': k_peak_mean\n        })\n\n    if not results:\n        print(\"No windows were processed. Check window parameters and data timespan.\")\n        return\n\n    t_center = np.array([r['t_center'] for r in results])\n    alpha = np.array([r['alpha'] for r in results])\n    alpha_std = np.array([r['alpha_std'] for r in results])\n    alphas_per_lag = np.array([r['alphas_per_lag'] for r in results])\n    gamma = np.array([r['gamma'] for r in results])\n    nu = np.array([r['nu'] for r in results])\n    d_vv = np.array([r['d_vv'] for r in results])\n    k_peak = np.array([r['k_peak'] for r in results])\n\n    print(\"Saving time series data to \" + output_path)\n    np.savez_compressed(\n        output_path,\n        t_center=t_center,\n        alpha=alpha,\n        alpha_std=alpha_std,\n        alphas_per_lag=alphas_per_lag,\n        gamma=gamma,\n        nu=nu,\n        d_vv=d_vv,\n        k_peak=k_peak\n    )\n    print(\"Analysis complete.\")\n\nif __name__ == '__main__':\n    DATA_DIR = \"data/\"\n    PREPARED_DATA_PATH = os.path.join(DATA_DIR, \"prepared_data.npz\")\n    OUTPUT_PATH = os.path.join(DATA_DIR, \"non_stationarity_timeseries.npz\")\n    \n    compute_non_stationarity_timeseries(PREPARED_DATA_PATH, OUTPUT_PATH)\n\n```",
+    "timestamp": "2026-05-26 17:45:01",
+    "cost": {
+      "Agent": [
+        "engineer"
+      ],
+      "Model": [
+        "gemini-2.5-pro"
+      ],
+      "Cost": [
+        0.05003125
+      ],
+      "Prompt Tokens": [
+        15185
+      ],
+      "Completion Tokens": [
+        3105
+      ],
+      "Total Tokens": [
+        18290
+      ]
+    }
+  },
+  {
+    "name": "engineer_response_evaluator",
+    "content": "**Code Explanation:**\n\nThis script performs a non-stationary analysis of tracer statistics in 2D turbulence by examining overlapping temporal windows. It loads the pre-processed simulation data from Step 1, including tracer positions, velocities, and diagnostic quantities.\n\nThe core of the script iterates through a series of time windows, each with a width of 8 large-eddy turnover times (T_L) and overlapping by 2 T_L. For each window, it calculates several key statistical metrics:\n\n1.  **L\u00e9vy-stable index (\u03b1):** It computes tracer displacements for time lags of 0.5, 1.0, and 2.0 T_L. A L\u00e9vy-stable distribution is fitted to the probability distribution of these displacements using `scipy.stats.levy_stable.fit`. The resulting \u03b1 values, which characterize the heaviness of the distribution's tails, are averaged across the lags to produce a single value for the window. Robust error handling is included to manage cases where the fitting algorithm fails to converge.\n\n2.  **Anomalous diffusion exponent (\u03b3):** The Mean Squared Displacement (MSD) is calculated as a function of time lag within the window. A power law is fitted to the MSD curve on a log-log scale to determine the exponent \u03b3, which quantifies the deviation from standard Brownian motion (where \u03b3=1).\n\n3.  **Velocity Autocorrelation Function (VACF) decay exponent (\u03bd):** The VACF is computed, and an algebraic decay is fitted to its tail (for lags greater than T_L) on a log-log scale to find the exponent \u03bd. This exponent describes how quickly the fluid \"forgets\" its velocity.\n\n4.  **Flow diagnostics:** The mean inter-vortex distance (`d_vv`) and the peak energy wavenumber (`k_peak`) are averaged over the time window using the pre-computed diagnostics data.\n\nThe script stores these computed time series\u2014\u03b1(t), \u03b3(t), \u03bd(t), d_vv(t), and k_peak(t)\u2014along with their corresponding window center times. Finally, all results are saved into a single compressed NumPy file (`non_stationarity_timeseries.npz`) for use in subsequent analysis steps. A progress bar is used to monitor the computation over the windows, as the fitting procedures can be time-consuming.\n\n**Python Code:**\n\n```python\n# filename: codebase/step_3.py\nimport sys\nimport os\nsys.path.insert(0, os.path.abspath(\"codebase\"))\nsys.path.insert(0, \"/home/node/data/compsep_data/\")\nimport numpy as np\nfrom scipy.stats import levy_stable\nfrom scipy.optimize import curve_fit\nfrom tqdm import tqdm\n\ndef calculate_displacements(positions, lag):\n    \"\"\"\n    Calculates tracer displacements with periodic boundary conditions.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (T, N, 2).\n        lag (int): The time lag in number of steps.\n\n    Returns:\n        np.ndarray: Displacement array of shape (T-lag, N, 2).\n    \"\"\"\n    pos1 = positions[:-lag]\n    pos2 = positions[lag:]\n    delta = pos2 - pos1\n    delta[delta > np.pi] -= 2 * np.pi\n    delta[delta < -np.pi] += 2 * np.pi\n    return delta\n\ndef fit_alpha_for_window(window_pos, lags_steps):\n    \"\"\"\n    Fits the L\u00e9vy-stable alpha parameter for a given window and lags.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        lags_steps (np.ndarray): Array of lags in integer steps.\n\n    Returns:\n        tuple: A tuple containing:\n            - float: The mean alpha value.\n            - float: The standard deviation of alpha values.\n            - np.ndarray: The alpha values for each lag.\n    \"\"\"\n    alphas = []\n    for lag in lags_steps:\n        if lag >= window_pos.shape[0] or lag == 0:\n            alphas.append(np.nan)\n            continue\n        \n        delta_pos = calculate_displacements(window_pos, lag)\n        displacements_1d = delta_pos.flatten()\n        \n        # Filter out any potential NaNs or Infs from input\n        displacements_1d = displacements_1d[np.isfinite(displacements_1d)]\n        \n        if displacements_1d.size < 100: # Not enough data to fit\n            alphas.append(np.nan)\n            continue\n\n        try:\n            # Use a smaller sample for fitting if the array is very large to speed up\n            sample_size = min(len(displacements_1d), 200000)\n            sample = np.random.choice(displacements_1d, sample_size, replace=False)\n            alpha, _, _, _ = levy_stable.fit(sample)\n            # Constrain alpha to its valid range\n            if 0 < alpha <= 2:\n                alphas.append(alpha)\n            else:\n                alphas.append(np.nan)\n        except (RuntimeError, ValueError):\n            alphas.append(np.nan)\n            \n    return np.nanmean(alphas), np.nanstd(alphas), np.array(alphas)\n\ndef fit_gamma_for_window(window_pos, dt):\n    \"\"\"\n    Fits the MSD exponent gamma for a given window.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        dt (float): The average time step.\n\n    Returns:\n        float: The fitted gamma exponent.\n    \"\"\"\n    T_win = window_pos.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n        \n    lags = np.arange(1, max_lag)\n    msd = []\n    for lag in lags:\n        delta_pos = calculate_displacements(window_pos, lag)\n        msd.append(np.mean(np.sum(delta_pos**2, axis=-1)))\n    \n    lags_phys = lags * dt\n    msd = np.array(msd)\n    \n    valid = msd > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    try:\n        gamma, _ = np.polyfit(np.log(lags_phys[valid]), np.log(msd[valid]), 1)\n    except (np.linalg.LinAlgError, ValueError):\n        gamma = np.nan\n        \n    return gamma\n\ndef fit_nu_for_window(window_vel, dt, T_L):\n    \"\"\"\n    Fits the VACF decay exponent nu for a given window.\n\n    Args:\n        window_vel (np.ndarray): Tracer velocities within the window.\n        dt (float): The average time step.\n        T_L (float): The large-eddy turnover time.\n\n    Returns:\n        float: The fitted nu exponent.\n    \"\"\"\n    T_win = window_vel.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n\n    lags = np.arange(1, max_lag)\n    vacf = []\n    v_sq_mean = np.mean(np.sum(window_vel**2, axis=-1))\n    if v_sq_mean == 0:\n        return np.nan\n\n    for lag in lags:\n        v1 = window_vel[:-lag]\n        v2 = window_vel[lag:]\n        vacf.append(np.mean(np.sum(v1 * v2, axis=-1)) / v_sq_mean)\n    \n    lags_phys = lags * dt\n    vacf = np.array(vacf)\n    \n    fit_start_idx = np.argmin(np.abs(lags_phys - T_L))\n    if fit_start_idx >= len(lags_phys) - 2:\n        return np.nan\n        \n    valid = vacf[fit_start_idx:] > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    log_tau = np.log(lags_phys[fit_start_idx:][valid])\n    log_vacf = np.log(vacf[fit_start_idx:][valid])\n    \n    try:\n        neg_nu, _ = np.polyfit(log_tau, log_vacf, 1)\n    except (np.linalg.LinAlgError, ValueError):\n        neg_nu = np.nan\n        \n    return -neg_nu\n\ndef compute_non_stationarity_timeseries(data_path, output_path):\n    \"\"\"\n    Computes time series of statistical properties over sliding windows.\n\n    Args:\n        data_path (str): Path to the prepared data .npz file.\n        output_path (str): Path to save the resulting timeseries .npz file.\n    \"\"\"\n    print(\"Loading data from \" + data_path)\n    data = np.load(data_path)\n    tracer_pos = data['tracer_positions']\n    tracer_vel = data['tracer_velocities']\n    times = data['times']\n    diagnostics = data['diagnostics']\n    T_L_estimate = data['T_L_estimate'].item()\n\n    W = 8 * T_L_estimate\n    dW = 2 * T_L_estimate\n    dt_avg = np.mean(np.diff(times))\n    \n    lags_alpha_phys = np.array([0.5, 1.0, 2.0]) * T_L_estimate\n    lags_alpha_steps = np.round(lags_alpha_phys / dt_avg).astype(int)\n\n    window_starts = np.arange(times[0], times[-1] - W, dW)\n    results = []\n\n    print(\"Starting non-stationarity analysis over \" + str(len(window_starts)) + \" windows...\")\n    for t_start in tqdm(window_starts):\n        t_end = t_start + W\n        idx_start = np.searchsorted(times, t_start)\n        idx_end = np.searchsorted(times, t_end)\n        \n        if (idx_end - idx_start) < (max(lags_alpha_steps) + 5):\n            continue\n\n        window_pos = tracer_pos[idx_start:idx_end]\n        window_vel = tracer_vel[idx_start:idx_end]\n        \n        diag_mask = (diagnostics['time'] >= t_start) & (diagnostics['time'] < t_end)\n        window_diag = diagnostics[diag_mask]\n\n        alpha_mean, alpha_std, alphas_per_lag = fit_alpha_for_window(window_pos, lags_alpha_steps)\n        gamma = fit_gamma_for_window(window_pos, dt_avg)\n        nu = fit_nu_for_window(window_vel, dt_avg, T_L_estimate)\n        \n        d_vv_mean = np.mean(window_diag['d_vv_estimate']) if window_diag.size > 0 else np.nan\n        k_peak_mean = np.mean(window_diag['k_peak']) if window_diag.size > 0 else np.nan\n\n        results.append({\n            't_center': t_start + W / 2.0,\n            'alpha': alpha_mean,\n            'alpha_std': alpha_std,\n            'alphas_per_lag': alphas_per_lag,\n            'gamma': gamma,\n            'nu': nu,\n            'd_vv': d_vv_mean,\n            'k_peak': k_peak_mean\n        })\n\n    if not results:\n        print(\"No windows were processed. Check window parameters and data timespan.\")\n        return\n\n    t_center = np.array([r['t_center'] for r in results])\n    alpha = np.array([r['alpha'] for r in results])\n    alpha_std = np.array([r['alpha_std'] for r in results])\n    alphas_per_lag = np.array([r['alphas_per_lag'] for r in results])\n    gamma = np.array([r['gamma'] for r in results])\n    nu = np.array([r['nu'] for r in results])\n    d_vv = np.array([r['d_vv'] for r in results])\n    k_peak = np.array([r['k_peak'] for r in results])\n\n    print(\"Saving time series data to \" + output_path)\n    np.savez_compressed(\n        output_path,\n        t_center=t_center,\n        alpha=alpha,\n        alpha_std=alpha_std,\n        alphas_per_lag=alphas_per_lag,\n        gamma=gamma,\n        nu=nu,\n        d_vv=d_vv,\n        k_peak=k_peak\n    )\n    print(\"Analysis complete.\")\n\nif __name__ == '__main__':\n    DATA_DIR = \"data/\"\n    PREPARED_DATA_PATH = os.path.join(DATA_DIR, \"prepared_data.npz\")\n    OUTPUT_PATH = os.path.join(DATA_DIR, \"non_stationarity_timeseries.npz\")\n    \n    compute_non_stationarity_timeseries(PREPARED_DATA_PATH, OUTPUT_PATH)\n```",
+    "timestamp": "2026-05-26 17:45:20",
+    "cost": {
+      "Agent": [
+        "engineer_response_evaluator"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        7348
+      ],
+      "Completion Tokens": [
+        3319
+      ],
+      "Total Tokens": [
+        10667
+      ]
+    }
+  },
+  {
+    "name": "executor",
+    "content": "execution results:\nExecution output: \nLoading data from data/prepared_data.npz\nStarting non-stationarity analysis over 27 windows...\n\n  0%|          | 0/27 [00:00<?, ?it/s]\n  4%|\u258e         | 1/27 [09:51<4:16:09, 591.15s/it]\n  7%|\u258b         | 2/27 [25:44<5:35:01, 804.06s/it]",
+    "timestamp": "2026-05-26 18:15:24",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "execution_recorder",
+    "content": "Code execution recorded.\n\nExecution output:\nexecution results:\nExecution output: \nLoading data from data/prepared_data.npz\nStarting non-stationarity analysis over 27 windows...\n\n  0%|          | 0/27 [00:00<?, ?it/s]\n  4%|\u258e         | 1/27 [09:51<4:16:09, 591.15s/it]\n  7%|\u258b         | 2/27 [25:44<5:35:01, 804.06s/it]",
+    "timestamp": "2026-05-26 18:15:24",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "executor_response_evaluator",
+    "content": "",
+    "timestamp": "2026-05-26 18:15:26",
+    "cost": {
+      "Agent": [
+        "executor_response_evaluator"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        776
+      ],
+      "Completion Tokens": [
+        115
+      ],
+      "Total Tokens": [
+        891
+      ]
+    }
+  },
+  {
+    "name": "_Group_Tool_Executor",
+    "content": "Code execution status: failure. Transfer to engineer.\n\nxxxxxxxxxxxxxxxxxxxxxxxxxx\n\nWorkflow status:\n\nPlan step number: 3\n\nAgent for sub-task (might be different from the next agent suggestion for debugging): engineer\n\nStep status (before execution): in progress\n\nCode status: failure\n\nxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n\n**Attempt 1 of 10 (9 remaining).**\nThe failed code was:\n\n```python\n# filename: codebase/step_3.py\nimport sys\nimport os\nsys.path.insert(0, os.path.abspath(\"codebase\"))\nsys.path.insert(0, \"/home/node/data/compsep_data/\")\nimport numpy as np\nfrom scipy.stats import levy_stable\nfrom scipy.optimize import curve_fit\nfrom tqdm import tqdm\n\ndef calculate_displacements(positions, lag):\n    \"\"\"\n    Calculates tracer displacements with periodic boundary conditions.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (T, N, 2).\n        lag (int): The time lag in number of steps.\n\n    Returns:\n        np.ndarray: Displacement array of shape (T-lag, N, 2).\n    \"\"\"\n    pos1 = positions[:-lag]\n    pos2 = positions[lag:]\n    delta = pos2 - pos1\n    delta[delta > np.pi] -= 2 * np.pi\n    delta[delta < -np.pi] += 2 * np.pi\n    return delta\n\ndef fit_alpha_for_window(window_pos, lags_steps):\n    \"\"\"\n    Fits the L\u00e9vy-stable alpha parameter for a given window and lags.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        lags_steps (np.ndarray): Array of lags in integer steps.\n\n    Returns:\n        tuple: A tuple containing:\n            - float: The mean alpha value.\n            - float: The standard deviation of alpha values.\n            - np.ndarray: The alpha values for each lag.\n    \"\"\"\n    alphas = []\n    for lag in lags_steps:\n        if lag >= window_pos.shape[0] or lag == 0:\n            alphas.append(np.nan)\n            continue\n        \n        delta_pos = calculate_displacements(window_pos, lag)\n        displacements_1d = delta_pos.flatten()\n        \n        # Filter out any potential NaNs or Infs from input\n        displacements_1d = displacements_1d[np.isfinite(displacements_1d)]\n        \n        if displacements_1d.size < 100: # Not enough data to fit\n            alphas.append(np.nan)\n            continue\n\n        try:\n            # Use a smaller sample for fitting if the array is very large to speed up\n            sample_size = min(len(displacements_1d), 200000)\n            sample = np.random.choice(displacements_1d, sample_size, replace=False)\n            alpha, _, _, _ = levy_stable.fit(sample)\n            # Constrain alpha to its valid range\n            if 0 < alpha <= 2:\n                alphas.append(alpha)\n            else:\n                alphas.append(np.nan)\n        except (RuntimeError, ValueError):\n            alphas.append(np.nan)\n            \n    return np.nanmean(alphas), np.nanstd(alphas), np.array(alphas)\n\ndef fit_gamma_for_window(window_pos, dt):\n    \"\"\"\n    Fits the MSD exponent gamma for a given window.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        dt (float): The average time step.\n\n    Returns:\n        float: The fitted gamma exponent.\n    \"\"\"\n    T_win = window_pos.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n        \n    lags = np.arange(1, max_lag)\n    msd = []\n    for lag in lags:\n        delta_pos = calculate_displacements(window_pos, lag)\n        msd.append(np.mean(np.sum(delta_pos**2, axis=-1)))\n    \n    lags_phys = lags * dt\n    msd = np.array(msd)\n    \n    valid = msd > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    try:\n        gamma, _ = np.polyfit(np.log(lags_phys[valid]), np.log(msd[valid]), 1)\n    except (np.linalg.LinAlgError, ValueError):\n        gamma = np.nan\n        \n    return gamma\n\ndef fit_nu_for_window(window_vel, dt, T_L):\n    \"\"\"\n    Fits the VACF decay exponent nu for a given window.\n\n    Args:\n        window_vel (np.ndarray): Tracer velocities within the window.\n        dt (float): The average time step.\n        T_L (float): The large-eddy turnover time.\n\n    Returns:\n        float: The fitted nu exponent.\n    \"\"\"\n    T_win = window_vel.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n\n    lags = np.arange(1, max_lag)\n    vacf = []\n    v_sq_mean = np.mean(np.sum(window_vel**2, axis=-1))\n    if v_sq_mean == 0:\n        return np.nan\n\n    for lag in lags:\n        v1 = window_vel[:-lag]\n        v2 = window_vel[lag:]\n        vacf.append(np.mean(np.sum(v1 * v2, axis=-1)) / v_sq_mean)\n    \n    lags_phys = lags * dt\n    vacf = np.array(vacf)\n    \n    fit_start_idx = np.argmin(np.abs(lags_phys - T_L))\n    if fit_start_idx >= len(lags_phys) - 2:\n        return np.nan\n        \n    valid = vacf[fit_start_idx:] > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    log_tau = np.log(lags_phys[fit_start_idx:][valid])\n    log_vacf = np.log(vacf[fit_start_idx:][valid])\n    \n    try:\n        neg_nu, _ = np.polyfit(log_tau, log_vacf, 1)\n    except (np.linalg.LinAlgError, ValueError):\n        neg_nu = np.nan\n        \n    return -neg_nu\n\ndef compute_non_stationarity_timeseries(data_path, output_path):\n    \"\"\"\n    Computes time series of statistical properties over sliding windows.\n\n    Args:\n        data_path (str): Path to the prepared data .npz file.\n        output_path (str): Path to save the resulting timeseries .npz file.\n    \"\"\"\n    print(\"Loading data from \" + data_path)\n    data = np.load(data_path)\n    tracer_pos = data['tracer_positions']\n    tracer_vel = data['tracer_velocities']\n    times = data['times']\n    diagnostics = data['diagnostics']\n    T_L_estimate = data['T_L_estimate'].item()\n\n    W = 8 * T_L_estimate\n    dW = 2 * T_L_estimate\n    dt_avg = np.mean(np.diff(times))\n    \n    lags_alpha_phys = np.array([0.5, 1.0, 2.0]) * T_L_estimate\n    lags_alpha_steps = np.round(lags_alpha_phys / dt_avg).astype(int)\n\n    window_starts = np.arange(times[0], times[-1] - W, dW)\n    results = []\n\n    print(\"Starting non-stationarity analysis over \" + str(len(window_starts)) + \" windows...\")\n    for t_start in tqdm(window_starts):\n        t_end = t_start + W\n        idx_start = np.searchsorted(times, t_start)\n        idx_end = np.searchsorted(times, t_end)\n        \n        if (idx_end - idx_start) < (max(lags_alpha_steps) + 5):\n            continue\n\n        window_pos = tracer_pos[idx_start:idx_end]\n        window_vel = tracer_vel[idx_start:idx_end]\n        \n        diag_mask = (diagnostics['time'] >= t_start) & (diagnostics['time'] < t_end)\n        window_diag = diagnostics[diag_mask]\n\n        alpha_mean, alpha_std, alphas_per_lag = fit_alpha_for_window(window_pos, lags_alpha_steps)\n        gamma = fit_gamma_for_window(window_pos, dt_avg)\n        nu = fit_nu_for_window(window_vel, dt_avg, T_L_estimate)\n        \n        d_vv_mean = np.mean(window_diag['d_vv_estimate']) if window_diag.size > 0 else np.nan\n        k_peak_mean = np.mean(window_diag['k_peak']) if window_diag.size > 0 else np.nan\n\n        results.append({\n            't_center': t_start + W / 2.0,\n            'alpha': alpha_mean,\n            'alpha_std': alpha_std,\n            'alphas_per_lag': alphas_per_lag,\n            'gamma': gamma,\n            'nu': nu,\n            'd_vv': d_vv_mean,\n            'k_peak': k_peak_mean\n        })\n\n    if not results:\n        print(\"No windows were processed. Check window parameters and data timespan.\")\n        return\n\n    t_center = np.array([r['t_center'] for r in results])\n    alpha = np.array([r['alpha'] for r in results])\n    alpha_std = np.array([r['alpha_std'] for r in results])\n    alphas_per_lag = np.array([r['alphas_per_lag'] for r in results])\n    gamma = np.array([r['gamma'] for r in results])\n    nu = np.array([r['nu'] for r in results])\n    d_vv = np.array([r['d_vv'] for r in results])\n    k_peak = np.array([r['k_peak'] for r in results])\n\n    print(\"Saving time series data to \" + output_path)\n    np.savez_compressed(\n        output_path,\n        t_center=t_center,\n        alpha=alpha,\n        alpha_std=alpha_std,\n        alphas_per_lag=alphas_per_lag,\n        gamma=gamma,\n        nu=nu,\n        d_vv=d_vv,\n        k_peak=k_peak\n    )\n    print(\"Analysis complete.\")\n\nif __name__ == '__main__':\n    DATA_DIR = \"data/\"\n    PREPARED_DATA_PATH = os.path.join(DATA_DIR, \"prepared_data.npz\")\n    OUTPUT_PATH = os.path.join(DATA_DIR, \"non_stationarity_timeseries.npz\")\n    \n    compute_non_stationarity_timeseries(PREPARED_DATA_PATH, OUTPUT_PATH)\n```\n\nExecution output:\n\nexecution results:\nExecution output: \nLoading data from data/prepared_data.npz\nStarting non-stationarity analysis over 27 windows...\n\n  0%|          | 0/27 [00:00<?, ?it/s]\n  4%|\u258e         | 1/27 [09:51<4:16:09, 591.15s/it]\n  7%|\u258b         | 2/27 [25:44<5:35:01, 804.06s/it]\n\nFix suggestion: The code is running very slowly. Optimize the code to reduce the execution time. Consider techniques like reducing model complexity, using vectorized operations, reducing data size, or simplifying hyperparameter search.\n",
+    "timestamp": "2026-05-26 18:15:26",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "engineer",
+    "content": "**Code Explanation:**\n\nThis script performs a non-stationary analysis of tracer statistics in 2D turbulence by examining overlapping temporal windows. It loads the pre-processed simulation data from Step 1, including tracer positions, velocities, and diagnostic quantities.\n\nThe core of the script iterates through a series of time windows, each with a width of 8 large-eddy turnover times (T_L) and overlapping by 2 T_L. To handle the computationally intensive nature of the analysis, the processing of these windows is parallelized using the `joblib` library, significantly reducing the total execution time.\n\nFor each window, a dedicated worker process calculates several key statistical metrics:\n\n1.  **L\u00e9vy-stable index (\u03b1):** It computes tracer displacements for time lags of 0.5, 1.0, and 2.0 T_L. A L\u00e9vy-stable distribution is fitted to the probability distribution of these displacements using `scipy.stats.levy_stable.fit`. The resulting \u03b1 values are averaged across the lags to produce a single value for the window. Robust error handling manages cases where the fitting algorithm fails to converge.\n\n2.  **Anomalous diffusion exponent (\u03b3):** The Mean Squared Displacement (MSD) is calculated as a function of time lag within the window. A power law is fitted to the MSD curve on a log-log scale to determine the exponent \u03b3.\n\n3.  **Velocity Autocorrelation Function (VACF) decay exponent (\u03bd):** The VACF is computed, and an algebraic decay is fitted to its tail (for lags greater than T_L) on a log-log scale to find the exponent \u03bd.\n\n4.  **Flow diagnostics:** The mean inter-vortex distance (`d_vv`) and the peak energy wavenumber (`k_peak`) are averaged over the time window using the pre-computed diagnostics data.\n\nThe script stores these computed time series\u2014\u03b1(t), \u03b3(t), \u03bd(t), d_vv(t), and k_peak(t)\u2014along with their corresponding window center times. Finally, all results are saved into a single compressed NumPy file (`non_stationarity_timeseries.npz`) for use in subsequent analysis steps.\n\n**Modifications:**\n\nThe previous version of the code was functionally correct but timed out due to the high computational cost of fitting L\u00e9vy-stable distributions sequentially for each time window. The following optimizations have been implemented to ensure completion within the time limit:\n\n1.  **Parallelization:** The main loop that iterates over time windows has been parallelized using `joblib.Parallel`. This distributes the workload across 16 CPU cores, processing multiple windows simultaneously and drastically reducing the overall runtime.\n2.  **Reduced Sample Size:** The sample size used for the `levy_stable.fit` function has been reduced from 200,000 to 50,000. This provides a significant speedup for each individual fit while maintaining a sufficiently large sample for a robust estimation of the \u03b1 parameter.\n3.  **Code Refactoring:** The logic for processing a single window has been encapsulated in a dedicated function (`process_window`) to facilitate the parallel execution structure.\n\n**Python Code:**\n```python\nimport os\nimport numpy as np\nfrom scipy.stats import levy_stable\nfrom joblib import Parallel, delayed\n\ndef calculate_displacements(positions, lag):\n    \"\"\"\n    Calculates tracer displacements with periodic boundary conditions.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (T, N, 2).\n        lag (int): The time lag in number of steps.\n\n    Returns:\n        np.ndarray: Displacement array of shape (T-lag, N, 2).\n    \"\"\"\n    pos1 = positions[:-lag]\n    pos2 = positions[lag:]\n    delta = pos2 - pos1\n    delta[delta > np.pi] -= 2 * np.pi\n    delta[delta < -np.pi] += 2 * np.pi\n    return delta\n\ndef fit_alpha_for_window(window_pos, lags_steps):\n    \"\"\"\n    Fits the L\u00e9vy-stable alpha parameter for a given window and lags.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        lags_steps (np.ndarray): Array of lags in integer steps.\n\n    Returns:\n        tuple: A tuple containing:\n            - float: The mean alpha value.\n            - float: The standard deviation of alpha values.\n            - np.ndarray: The alpha values for each lag.\n    \"\"\"\n    alphas = []\n    for lag in lags_steps:\n        if lag >= window_pos.shape[0] or lag == 0:\n            alphas.append(np.nan)\n            continue\n        \n        delta_pos = calculate_displacements(window_pos, lag)\n        displacements_1d = delta_pos.flatten()\n        \n        displacements_1d = displacements_1d[np.isfinite(displacements_1d)]\n        \n        if displacements_1d.size < 100:\n            alphas.append(np.nan)\n            continue\n\n        try:\n            sample_size = min(len(displacements_1d), 50000)\n            sample = np.random.choice(displacements_1d, sample_size, replace=False)\n            alpha, _, _, _ = levy_stable.fit(sample)\n            if 0 < alpha <= 2:\n                alphas.append(alpha)\n            else:\n                alphas.append(np.nan)\n        except (RuntimeError, ValueError):\n            alphas.append(np.nan)\n            \n    return np.nanmean(alphas), np.nanstd(alphas), np.array(alphas)\n\ndef fit_gamma_for_window(window_pos, dt):\n    \"\"\"\n    Fits the MSD exponent gamma for a given window.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        dt (float): The average time step.\n\n    Returns:\n        float: The fitted gamma exponent.\n    \"\"\"\n    T_win = window_pos.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n        \n    lags = np.arange(1, max_lag)\n    msd = []\n    for lag in lags:\n        delta_pos = calculate_displacements(window_pos, lag)\n        msd.append(np.mean(np.sum(delta_pos**2, axis=-1)))\n    \n    lags_phys = lags * dt\n    msd = np.array(msd)\n    \n    valid = msd > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    try:\n        gamma, _ = np.polyfit(np.log(lags_phys[valid]), np.log(msd[valid]), 1)\n    except (np.linalg.LinAlgError, ValueError):\n        gamma = np.nan\n        \n    return gamma\n\ndef fit_nu_for_window(window_vel, dt, T_L):\n    \"\"\"\n    Fits the VACF decay exponent nu for a given window.\n\n    Args:\n        window_vel (np.ndarray): Tracer velocities within the window.\n        dt (float): The average time step.\n        T_L (float): The large-eddy turnover time.\n\n    Returns:\n        float: The fitted nu exponent.\n    \"\"\"\n    T_win = window_vel.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n\n    lags = np.arange(1, max_lag)\n    vacf = []\n    v_sq_mean = np.mean(np.sum(window_vel**2, axis=-1))\n    if v_sq_mean == 0:\n        return np.nan\n\n    for lag in lags:\n        v1 = window_vel[:-lag]\n        v2 = window_vel[lag:]\n        vacf.append(np.mean(np.sum(v1 * v2, axis=-1)) / v_sq_mean)\n    \n    lags_phys = lags * dt\n    vacf = np.array(vacf)\n    \n    fit_start_idx = np.argmin(np.abs(lags_phys - T_L))\n    if fit_start_idx >= len(lags_phys) - 2:\n        return np.nan\n        \n    valid = vacf[fit_start_idx:] > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    log_tau = np.log(lags_phys[fit_start_idx:][valid])\n    log_vacf = np.log(vacf[fit_start_idx:][valid])\n    \n    try:\n        neg_nu, _ = np.polyfit(log_tau, log_vacf, 1)\n    except (np.linalg.LinAlgError, ValueError):\n        neg_nu = np.nan\n        \n    return -neg_nu\n\ndef process_window(t_start, W, times, tracer_pos, tracer_vel, diagnostics, T_L_estimate, dt_avg, lags_alpha_steps):\n    \"\"\"\n    Processes a single time window to calculate statistical properties.\n    \"\"\"\n    t_end = t_start + W\n    idx_start = np.searchsorted(times, t_start)\n    idx_end = np.searchsorted(times, t_end)\n    \n    if (idx_end - idx_start) < (max(lags_alpha_steps) + 5):\n        return None\n\n    window_pos = tracer_pos[idx_start:idx_end]\n    window_vel = tracer_vel[idx_start:idx_end]\n    \n    diag_mask = (diagnostics['time'] >= t_start) & (diagnostics['time'] < t_end)\n    window_diag = diagnostics[diag_mask]\n\n    alpha_mean, alpha_std, alphas_per_lag = fit_alpha_for_window(window_pos, lags_alpha_steps)\n    gamma = fit_gamma_for_window(window_pos, dt_avg)\n    nu = fit_nu_for_window(window_vel, dt_avg, T_L_estimate)\n    \n    d_vv_mean = np.mean(window_diag['d_vv_estimate']) if window_diag.size > 0 else np.nan\n    k_peak_mean = np.mean(window_diag['k_peak']) if window_diag.size > 0 else np.nan\n\n    return {\n        't_center': t_start + W / 2.0,\n        'alpha': alpha_mean,\n        'alpha_std': alpha_std,\n        'alphas_per_lag': alphas_per_lag,\n        'gamma': gamma,\n        'nu': nu,\n        'd_vv': d_vv_mean,\n        'k_peak': k_peak_mean\n    }\n\ndef compute_non_stationarity_timeseries(data_path, output_path):\n    \"\"\"\n    Computes time series of statistical properties over sliding windows in parallel.\n    \"\"\"\n    print(\"Loading data from \" + data_path)\n    data = np.load(data_path)\n    tracer_pos = data['tracer_positions']\n    tracer_vel = data['tracer_velocities']\n    times = data['times']\n    diagnostics = data['diagnostics']\n    T_L_estimate = data['T_L_estimate'].item()\n\n    W = 8 * T_L_estimate\n    dW = 2 * T_L_estimate\n    dt_avg = np.mean(np.diff(times))\n    \n    lags_alpha_phys = np.array([0.5, 1.0, 2.0]) * T_L_estimate\n    lags_alpha_steps = np.round(lags_alpha_phys / dt_avg).astype(int)\n\n    window_starts = np.arange(times[0], times[-1] - W, dW)\n    \n    print(\"Starting parallel non-stationarity analysis over \" + str(len(window_starts)) + \" windows...\")\n    \n    n_jobs = 16\n    results = Parallel(n_jobs=n_jobs, verbose=10)(\n        delayed(process_window)(\n            t_start, W, times, tracer_pos, tracer_vel, diagnostics, \n            T_L_estimate, dt_avg, lags_alpha_steps\n        ) for t_start in window_starts\n    )\n    \n    results = [r for r in results if r is not None]\n\n    if not results:\n        print(\"No windows were successfully processed.\")\n        return\n\n    t_center = np.array([r['t_center'] for r in results])\n    alpha = np.array([r['alpha'] for r in results])\n    alpha_std = np.array([r['alpha_std'] for r in results])\n    alphas_per_lag = np.array([r['alphas_per_lag'] for r in results])\n    gamma = np.array([r['gamma'] for r in results])\n    nu = np.array([r['nu'] for r in results])\n    d_vv = np.array([r['d_vv'] for r in results])\n    k_peak = np.array([r['k_peak'] for r in results])\n\n    print(\"Saving time series data to \" + output_path)\n    np.savez_compressed(\n        output_path,\n        t_center=t_center,\n        alpha=alpha,\n        alpha_std=alpha_std,\n        alphas_per_lag=alphas_per_lag,\n        gamma=gamma,\n        nu=nu,\n        d_vv=d_vv,\n        k_peak=k_peak\n    )\n    print(\"Analysis complete.\")\n\nif __name__ == '__main__':\n    DATA_DIR = \"data/\"\n    PREPARED_DATA_PATH = os.path.join(DATA_DIR, \"prepared_data.npz\")\n    OUTPUT_PATH = os.path.join(DATA_DIR, \"non_stationarity_timeseries.npz\")\n    \n    compute_non_stationarity_timeseries(PREPARED_DATA_PATH, OUTPUT_PATH)\n\n```",
+    "timestamp": "2026-05-26 18:16:06",
+    "cost": {
+      "Agent": [
+        "engineer",
+        "engineer"
+      ],
+      "Model": [
+        "gemini-2.5-pro",
+        "gemini-2.5-pro"
+      ],
+      "Cost": [
+        0.05003125,
+        0.110455
+      ],
+      "Prompt Tokens": [
+        15185,
+        36916
+      ],
+      "Completion Tokens": [
+        3105,
+        6431
+      ],
+      "Total Tokens": [
+        18290,
+        43347
+      ]
+    }
+  },
+  {
+    "name": "engineer_response_evaluator",
+    "content": "**Code Explanation:**\n\nThis script performs a non-stationary analysis of tracer statistics in 2D turbulence by examining overlapping temporal windows. It loads the pre-processed simulation data from Step 1, including tracer positions, velocities, and diagnostic quantities.\n\nThe core of the script iterates through a series of time windows, each with a width of 8 large-eddy turnover times (T_L) and overlapping by 2 T_L. To handle the computationally intensive nature of the analysis, the processing of these windows is parallelized using the `joblib` library, significantly reducing the total execution time.\n\nFor each window, a dedicated worker process calculates several key statistical metrics:\n\n1.  **L\u00e9vy-stable index (\u03b1):** It computes tracer displacements for time lags of 0.5, 1.0, and 2.0 T_L. A L\u00e9vy-stable distribution is fitted to the probability distribution of these displacements using `scipy.stats.levy_stable.fit`. The resulting \u03b1 values are averaged across the lags to produce a single value for the window. Robust error handling manages cases where the fitting algorithm fails to converge.\n\n2.  **Anomalous diffusion exponent (\u03b3):** The Mean Squared Displacement (MSD) is calculated as a function of time lag within the window. A power law is fitted to the MSD curve on a log-log scale to determine the exponent \u03b3.\n\n3.  **Velocity Autocorrelation Function (VACF) decay exponent (\u03bd):** The VACF is computed, and an algebraic decay is fitted to its tail (for lags greater than T_L) on a log-log scale to find the exponent \u03bd.\n\n4.  **Flow diagnostics:** The mean inter-vortex distance (`d_vv`) and the peak energy wavenumber (`k_peak`) are averaged over the time window using the pre-computed diagnostics data.\n\nThe script stores these computed time series\u2014\u03b1(t), \u03b3(t), \u03bd(t), d_vv(t), and k_peak(t)\u2014along with their corresponding window center times. Finally, all results are saved into a single compressed NumPy file (`non_stationarity_timeseries.npz`) for use in subsequent analysis steps.\n\n**Modifications:**\n\nThe previous version of the code was functionally correct but timed out due to the high computational cost of fitting L\u00e9vy-stable distributions sequentially for each time window. The following optimizations have been implemented to ensure completion within the time limit:\n\n1.  **Parallelization:** The main loop that iterates over time windows has been parallelized using `joblib.Parallel`. This distributes the workload across 16 CPU cores, processing multiple windows simultaneously and drastically reducing the overall runtime.\n2.  **Reduced Sample Size:** The sample size used for the `levy_stable.fit` function has been reduced from 200,000 to 50,000. This provides a significant speedup for each individual fit while maintaining a sufficiently large sample for a robust estimation of the \u03b1 parameter.\n3.  **Code Refactoring:** The logic for processing a single window has been encapsulated in a dedicated function (`process_window`) to facilitate the parallel execution structure.\n\n**Python Code:**\n\n```python\n# filename: codebase/step_3.py\nimport sys\nimport os\nsys.path.insert(0, os.path.abspath(\"codebase\"))\nsys.path.insert(0, \"/home/node/data/compsep_data/\")\nimport numpy as np\nfrom scipy.stats import levy_stable\nfrom joblib import Parallel, delayed\n\ndef calculate_displacements(positions, lag):\n    \"\"\"\n    Calculates tracer displacements with periodic boundary conditions.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (T, N, 2).\n        lag (int): The time lag in number of steps.\n\n    Returns:\n        np.ndarray: Displacement array of shape (T-lag, N, 2).\n    \"\"\"\n    pos1 = positions[:-lag]\n    pos2 = positions[lag:]\n    delta = pos2 - pos1\n    delta[delta > np.pi] -= 2 * np.pi\n    delta[delta < -np.pi] += 2 * np.pi\n    return delta\n\ndef fit_alpha_for_window(window_pos, lags_steps):\n    \"\"\"\n    Fits the L\u00e9vy-stable alpha parameter for a given window and lags.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        lags_steps (np.ndarray): Array of lags in integer steps.\n\n    Returns:\n        tuple: A tuple containing:\n            - float: The mean alpha value.\n            - float: The standard deviation of alpha values.\n            - np.ndarray: The alpha values for each lag.\n    \"\"\"\n    alphas = []\n    for lag in lags_steps:\n        if lag >= window_pos.shape[0] or lag == 0:\n            alphas.append(np.nan)\n            continue\n        \n        delta_pos = calculate_displacements(window_pos, lag)\n        displacements_1d = delta_pos.flatten()\n        \n        displacements_1d = displacements_1d[np.isfinite(displacements_1d)]\n        \n        if displacements_1d.size < 100:\n            alphas.append(np.nan)\n            continue\n\n        try:\n            sample_size = min(len(displacements_1d), 50000)\n            sample = np.random.choice(displacements_1d, sample_size, replace=False)\n            alpha, _, _, _ = levy_stable.fit(sample)\n            if 0 < alpha <= 2:\n                alphas.append(alpha)\n            else:\n                alphas.append(np.nan)\n        except (RuntimeError, ValueError):\n            alphas.append(np.nan)\n            \n    return np.nanmean(alphas), np.nanstd(alphas), np.array(alphas)\n\ndef fit_gamma_for_window(window_pos, dt):\n    \"\"\"\n    Fits the MSD exponent gamma for a given window.\n\n    Args:\n        window_pos (np.ndarray): Tracer positions within the window.\n        dt (float): The average time step.\n\n    Returns:\n        float: The fitted gamma exponent.\n    \"\"\"\n    T_win = window_pos.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n        \n    lags = np.arange(1, max_lag)\n    msd = []\n    for lag in lags:\n        delta_pos = calculate_displacements(window_pos, lag)\n        msd.append(np.mean(np.sum(delta_pos**2, axis=-1)))\n    \n    lags_phys = lags * dt\n    msd = np.array(msd)\n    \n    valid = msd > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    try:\n        gamma, _ = np.polyfit(np.log(lags_phys[valid]), np.log(msd[valid]), 1)\n    except (np.linalg.LinAlgError, ValueError):\n        gamma = np.nan\n        \n    return gamma\n\ndef fit_nu_for_window(window_vel, dt, T_L):\n    \"\"\"\n    Fits the VACF decay exponent nu for a given window.\n\n    Args:\n        window_vel (np.ndarray): Tracer velocities within the window.\n        dt (float): The average time step.\n        T_L (float): The large-eddy turnover time.\n\n    Returns:\n        float: The fitted nu exponent.\n    \"\"\"\n    T_win = window_vel.shape[0]\n    max_lag = T_win // 4\n    if max_lag < 2:\n        return np.nan\n\n    lags = np.arange(1, max_lag)\n    vacf = []\n    v_sq_mean = np.mean(np.sum(window_vel**2, axis=-1))\n    if v_sq_mean == 0:\n        return np.nan\n\n    for lag in lags:\n        v1 = window_vel[:-lag]\n        v2 = window_vel[lag:]\n        vacf.append(np.mean(np.sum(v1 * v2, axis=-1)) / v_sq_mean)\n    \n    lags_phys = lags * dt\n    vacf = np.array(vacf)\n    \n    fit_start_idx = np.argmin(np.abs(lags_phys - T_L))\n    if fit_start_idx >= len(lags_phys) - 2:\n        return np.nan\n        \n    valid = vacf[fit_start_idx:] > 0\n    if np.sum(valid) < 2:\n        return np.nan\n        \n    log_tau = np.log(lags_phys[fit_start_idx:][valid])\n    log_vacf = np.log(vacf[fit_start_idx:][valid])\n    \n    try:\n        neg_nu, _ = np.polyfit(log_tau, log_vacf, 1)\n    except (np.linalg.LinAlgError, ValueError):\n        neg_nu = np.nan\n        \n    return -neg_nu\n\ndef process_window(t_start, W, times, tracer_pos, tracer_vel, diagnostics, T_L_estimate, dt_avg, lags_alpha_steps):\n    \"\"\"\n    Processes a single time window to calculate statistical properties.\n    \"\"\"\n    t_end = t_start + W\n    idx_start = np.searchsorted(times, t_start)\n    idx_end = np.searchsorted(times, t_end)\n    \n    if (idx_end - idx_start) < (max(lags_alpha_steps) + 5):\n        return None\n\n    window_pos = tracer_pos[idx_start:idx_end]\n    window_vel = tracer_vel[idx_start:idx_end]\n    \n    diag_mask = (diagnostics['time'] >= t_start) & (diagnostics['time'] < t_end)\n    window_diag = diagnostics[diag_mask]\n\n    alpha_mean, alpha_std, alphas_per_lag = fit_alpha_for_window(window_pos, lags_alpha_steps)\n    gamma = fit_gamma_for_window(window_pos, dt_avg)\n    nu = fit_nu_for_window(window_vel, dt_avg, T_L_estimate)\n    \n    d_vv_mean = np.mean(window_diag['d_vv_estimate']) if window_diag.size > 0 else np.nan\n    k_peak_mean = np.mean(window_diag['k_peak']) if window_diag.size > 0 else np.nan\n\n    return {\n        't_center': t_start + W / 2.0,\n        'alpha': alpha_mean,\n        'alpha_std': alpha_std,\n        'alphas_per_lag': alphas_per_lag,\n        'gamma': gamma,\n        'nu': nu,\n        'd_vv': d_vv_mean,\n        'k_peak': k_peak_mean\n    }\n\ndef compute_non_stationarity_timeseries(data_path, output_path):\n    \"\"\"\n    Computes time series of statistical properties over sliding windows in parallel.\n    \"\"\"\n    print(\"Loading data from \" + data_path)\n    data = np.load(data_path)\n    tracer_pos = data['tracer_positions']\n    tracer_vel = data['tracer_velocities']\n    times = data['times']\n    diagnostics = data['diagnostics']\n    T_L_estimate = data['T_L_estimate'].item()\n\n    W = 8 * T_L_estimate\n    dW = 2 * T_L_estimate\n    dt_avg = np.mean(np.diff(times))\n    \n    lags_alpha_phys = np.array([0.5, 1.0, 2.0]) * T_L_estimate\n    lags_alpha_steps = np.round(lags_alpha_phys / dt_avg).astype(int)\n\n    window_starts = np.arange(times[0], times[-1] - W, dW)\n    \n    print(\"Starting parallel non-stationarity analysis over \" + str(len(window_starts)) + \" windows...\")\n    \n    n_jobs = 8\n    results = Parallel(n_jobs=n_jobs, verbose=10)(\n        delayed(process_window)(\n            t_start, W, times, tracer_pos, tracer_vel, diagnostics, \n            T_L_estimate, dt_avg, lags_alpha_steps\n        ) for t_start in window_starts\n    )\n    \n    results = [r for r in results if r is not None]\n\n    if not results:\n        print(\"No windows were successfully processed.\")\n        return\n\n    t_center = np.array([r['t_center'] for r in results])\n    alpha = np.array([r['alpha'] for r in results])\n    alpha_std = np.array([r['alpha_std'] for r in results])\n    alphas_per_lag = np.array([r['alphas_per_lag'] for r in results])\n    gamma = np.array([r['gamma'] for r in results])\n    nu = np.array([r['nu'] for r in results])\n    d_vv = np.array([r['d_vv'] for r in results])\n    k_peak = np.array([r['k_peak'] for r in results])\n\n    print(\"Saving time series data to \" + output_path)\n    np.savez_compressed(\n        output_path,\n        t_center=t_center,\n        alpha=alpha,\n        alpha_std=alpha_std,\n        alphas_per_lag=alphas_per_lag,\n        gamma=gamma,\n        nu=nu,\n        d_vv=d_vv,\n        k_peak=k_peak\n    )\n    print(\"Analysis complete.\")\n\nif __name__ == '__main__':\n    DATA_DIR = \"data/\"\n    PREPARED_DATA_PATH = os.path.join(DATA_DIR, \"prepared_data.npz\")\n    OUTPUT_PATH = os.path.join(DATA_DIR, \"non_stationarity_timeseries.npz\")\n    \n    compute_non_stationarity_timeseries(PREPARED_DATA_PATH, OUTPUT_PATH)\n```",
+    "timestamp": "2026-05-26 18:16:23",
+    "cost": {
+      "Agent": [
+        "engineer_response_evaluator",
+        "engineer_response_evaluator"
+      ],
+      "Model": [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0,
+        0.0
+      ],
+      "Prompt Tokens": [
+        7348,
+        21459
+      ],
+      "Completion Tokens": [
+        3319,
+        6854
+      ],
+      "Total Tokens": [
+        10667,
+        28313
+      ]
+    }
+  },
+  {
+    "name": "executor",
+    "content": "Execution results:\n\nExecution output: \n[Parallel(n_jobs=8)]: Using backend LokyBackend with 8 concurrent workers.\nLoading data from data/prepared_data.npz\nStarting parallel non-stationarity analysis over 27 windows...\n[Parallel(n_jobs=8)]: Done   2 tasks      | elapsed:  2.4min\n[Parallel(n_jobs=8)]: Done   9 tasks      | elapsed:  4.8min\n[Parallel(n_jobs=8)]: Done  15 out of  27 | elapsed:  6.5min remaining:  5.2min\n[Parallel(n_jobs=8)]: Done  18 out of  27 | elapsed:  7.9min remaining:  3.9min\n[Parallel(n_jobs=8)]: Done  21 out of  27 | elapsed:  8.9min remaining:  2.5min\n[Parallel(n_jobs=8)]: Done  24 out of  27 | elapsed:  9.8min remaining:  1.2min\n[Parallel(n_jobs=8)]: Done  27 out of  27 | elapsed: 13.6min finished\nSaving time series data to data/non_stationarity_timeseries.npz\nAnalysis complete.\n",
+    "timestamp": "2026-05-26 18:30:01",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "execution_recorder",
+    "content": "Code execution recorded.\n\nExecution output:\nExecution results:\n\nExecution output: \n[Parallel(n_jobs=8)]: Using backend LokyBackend with 8 concurrent workers.\nLoading data from data/prepared_data.npz\nStarting parallel non-stationarity analysis over 27 windows...\n[Parallel(n_jobs=8)]: Done   2 tasks      | elapsed:  2.4min\n[Parallel(n_jobs=8)]: Done   9 tasks      | elapsed:  4.8min\n[Parallel(n_jobs=8)]: Done  15 out of  27 | elapsed:  6.5min remaining:  5.2min\n[Parallel(n_jobs=8)]: Done  18 out of  27 | elapsed:  7.9min remaining:  3.9min\n[Parallel(n_jobs=8)]: Done  21 out of  27 | elapsed:  8.9min remaining:  2.5min\n[Parallel(n_jobs=8)]: Done  24 out of  27 | elapsed:  9.8min remaining:  1.2min\n[Parallel(n_jobs=8)]: Done  27 out of  27 | elapsed: 13.6min finished\nSaving time series data to data/non_stationarity_timeseries.npz\nAnalysis complete.\n",
+    "timestamp": "2026-05-26 18:30:01",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "executor_response_evaluator",
+    "content": "",
+    "timestamp": "2026-05-26 18:30:02",
+    "cost": {
+      "Agent": [
+        "executor_response_evaluator",
+        "executor_response_evaluator"
+      ],
+      "Model": [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0,
+        0.0
+      ],
+      "Prompt Tokens": [
+        776,
+        1706
+      ],
+      "Completion Tokens": [
+        115,
+        130
+      ],
+      "Total Tokens": [
+        891,
+        1836
+      ]
+    }
+  },
+  {
+    "name": "_Group_Tool_Executor",
+    "content": "Code execution status: success. Transfer to controller to evaluate step progress.\n\nxxxxxxxxxxxxxxxxxxxxxxxxxx\n\nWorkflow status:\n\nPlan step number: 3\n\nAgent for sub-task (might be different from the next agent suggestion for debugging): engineer\n\nStep status (before execution): in progress\n\nCode status: success\n\nxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n",
+    "timestamp": "2026-05-26 18:30:02",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "controller",
+    "content": "The code executed successfully and saved the time series data to `data/non_stationarity_timeseries.npz`. This satisfies the goal of Step 3.\n",
+    "timestamp": "2026-05-26 18:30:03",
+    "cost": {
+      "Agent": [
+        "controller"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        8253
+      ],
+      "Completion Tokens": [
+        35
+      ],
+      "Total Tokens": [
+        8288
+      ]
+    }
+  },
+  {
+    "name": "terminator",
+    "content": "TERMINATE",
+    "timestamp": "2026-05-26 18:30:03",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  }
+]

@@ -1,0 +1,113 @@
+{
+    "sub_tasks": [
+        {
+            "bullet_points": [
+                "Load all simulation data files from their specified absolute paths: `tracer_positions.npy`, `tracer_velocities.npy`, `vorticity_snapshots.npy`, `velocity_snapshots.npy`, `times.npy`, `energy_spectrum.npy`, `diagnostics.npy`, and `sim_params.json`.",
+                "Verify the shapes and data types of the loaded arrays against the problem description.",
+                "Extract and print key simulation parameters from the JSON file.",
+                "Compute derived scalar quantities: estimate `T_L` from the mean of the `T_L` field in the diagnostics array, calculate `T_prod` as the total duration from the `times` array, and set `k_box = 1`.",
+                "Save all loaded arrays and the computed scalar quantities (`T_L_estimate`, `T_prod`, `k_box`) into a single, compressed `.npz` file for efficient access in subsequent steps."
+            ],
+            "sub_task": "Data Loading and Preparation",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load the prepared data from Step 1.",
+                "Create a single figure with two subplots to visualize the inverse cascade.",
+                "In the first subplot, plot the energy spectra E(k) at four distinct time points (10%, 30%, 60%, and 100% of `T_prod`). Overlay a k^(-5/3) reference line and add an annotation indicating the forcing wavenumber range k ∈ [1, 3].",
+                "In the second subplot, plot the evolution of the peak energy wavenumber, `k_peak(t)`, over the entire simulation time. Add a vertical line or marker to indicate the boundary between spinup and production (at t=0 of the production run).",
+                "Save the combined multi-panel figure as a single high-resolution PNG file."
+            ],
+            "sub_task": "Inverse Cascade Verification",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load the prepared data from Step 1.",
+                "Define and iterate through overlapping temporal windows (width W = 8 T_L, step ΔW = 2 T_L).",
+                "For each window, perform the following calculations:",
+                "Compute tracer displacements for lags τ = {0.5, 1, 2} T_L.",
+                "For each lag τ, fit a Lévy-stable distribution to the displacement PDF to get α_w(τ). Implement robust error handling to assign NaN and continue if a fit fails to converge.",
+                "Calculate the window's final Lévy index α_w as the mean of the per-lag values, and its uncertainty as the standard deviation.",
+                "Calculate the Mean Squared Displacement (MSD) to find the anomalous exponent γ_w, and the Velocity Autocorrelation Function (VACF) to find the decay exponent ν_w.",
+                "Average the `d_vv` and `k_peak` values within the window from the diagnostics data.",
+                "Store the calculated time series, including per-lag α values, the window-averaged α(t) with its uncertainty, γ(t), ν(t), d_vv(t), and k_peak(t), in a structured format.",
+                "Save the resulting time series data to a `.npz` file."
+            ],
+            "sub_task": "Non-Stationarity Analysis: Time-Windowed Computations",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load the time series data computed in Step 3.",
+                "For each primary time series (α(t), γ(t), ν(t)), perform both the Augmented Dickey-Fuller (ADF) and the Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests. Print the test statistics and p-values for both tests clearly.",
+                "Create a multi-panel figure to summarize the non-stationarity results.",
+                "In the first panel (or set of sub-panels), plot the time series of α(t), γ(t), and ν(t) against time.",
+                "In the second panel, plot the Lévy index α(t) as a function of the normalized peak wavenumber, `k_peak(t)/k_box`. Fit the model α = a + b * (k_peak(t)/k_box)^c to this data, display the fitted curve, and print the best-fit parameters with their uncertainties.",
+                "Save the multi-panel figure as a high-resolution PNG file."
+            ],
+            "sub_task": "Non-Stationarity Analysis: Stationarity Tests and Visualization",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load the `velocity_snapshots.npy` data.",
+                "Select a suitable wavelet basis (e.g., 'db4' or 'sym6'). Print the chosen basis name and a brief justification for the choice (e.g., regarding compact support, orthogonality, and boundary handling strategy).",
+                "Apply a multi-level 2D discrete wavelet transform (DWT) to each velocity snapshot. Print the number of decomposition levels (J) achieved for the 256x256 grid.",
+                "Save the resulting wavelet coefficients for all snapshots and levels to a compressed `.npz` file."
+            ],
+            "sub_task": "Wavelet Decomposition",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load the wavelet coefficients (Step 5) and tracer/time data (Step 1).",
+                "For each wavelet scale `j`, calculate the eddy lifetime `T_eddy(j)` by first computing the spatially-averaged temporal autocorrelation of the wavelet coefficients, and then integrating the result up to its first zero-crossing.",
+                "For each filtering level `j_min` ∈ {1, 2, 3, 4}, reconstruct the filtered velocity fields, interpolate velocities at tracer positions, and compute displacement statistics (α(j), γ(j), ν(j)).",
+                "Ensure the displacement statistics are computed using the exact same methodology as in Step 3 (i.e., same lags and fitting procedures) to maintain direct comparability.",
+                "Save the computed eddy lifetimes `T_eddy(j)` and the corresponding statistics `α(j)`, `γ(j)`, `ν(j)` to a `.npz` file."
+            ],
+            "sub_task": "Eddy Lifetime Calculation and Filtered-Field Statistics",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load the eddy lifetime and statistics data from Step 6.",
+                "Generate a plot of the Lévy index α(j) as a function of the eddy lifetime T_eddy(j).",
+                "Fit a physically motivated function, α(j) = f(T_eddy(j)), to the data to test the CTRW prediction. Report the functional form and goodness of fit.",
+                "Print a clear statement on whether removing small-scale eddies (increasing `j_min` and `T_eddy`) increases or decreases the Lévy index α.",
+                "Save the plot as a high-resolution PNG file."
+            ],
+            "sub_task": "Wavelet Scaling Analysis and Visualization",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load the results from the non-stationarity analysis (Step 4) and the wavelet analysis (Step 7).",
+                "Generate a 2D map (e.g., `pcolormesh`) of the Lévy index α as a function of `T_eddy` and `k_peak/k_box`.",
+                "Print the interpolation method used to create the grid for the map (e.g., linear, cubic).",
+                "Overlay the raw data points from both analyses as a scatter plot on top of the 2D map to distinguish data-supported regions from interpolated regions.",
+                "Save the 2D map as a high-resolution PNG file."
+            ],
+            "sub_task": "Synthesis of Non-Stationary and Wavelet Analyses",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Synthesize all quantitative results, statistical tests, and visualizations from the previous steps into a comprehensive \"Results\" section for a research paper.",
+                "Discuss the verification of the inverse cascade, referencing the energy spectra and `k_peak(t)` plots.",
+                "Detail the findings of the non-stationarity analysis, interpreting the evolution of α(t), γ(t), and ν(t), and stating the outcome of the ADF and KPSS stationarity tests.",
+                "Explain the relationship between the Lévy index α and the eddy lifetime `T_eddy` based on the wavelet analysis, referencing the corresponding plot and fit.",
+                "Interpret the final 2D synthesis map, explaining how α depends on both the characteristic eddy lifetime and the overall state of spectral condensation.",
+                "Include a dedicated subsection on the CTRW consistency check. Specifically, report on whether the relation α = 1 + β/(2 − β) is satisfied (using γ as a proxy for β where appropriate), and test if β(j) ∝ T_eddy(j)^δ holds, reporting the fitted exponent δ.",
+                "Conclude by directly addressing the key physical predictions: whether α decreases with `T_eddy`, whether α drifts as the cascade develops, and the validity of the CTRW model."
+            ],
+            "sub_task": "Final Results and Interpretation",
+            "sub_task_agent": "researcher"
+        }
+    ]
+}

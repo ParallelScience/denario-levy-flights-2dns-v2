@@ -1,0 +1,1 @@
+mkdir -p /home/node/work/projects/levy_flights_2dns_v2/data/
