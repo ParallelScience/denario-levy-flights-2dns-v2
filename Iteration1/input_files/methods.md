@@ -1,3 +1,25 @@
+0.  **Simulation Step — CRITICAL ENGINEERING NOTES:**
+
+    The engineer must implement the 2D NS simulation in step_1 with these exact specifications:
+
+    a.  **Spinup criterion — USE FIXED TIME, NOT T/T_L.** The flow starts cold (U_rms ≈ 0), so T_L = L/U_rms → ∞ at t=0. The condition `while t/T_L < 10` NEVER EXITS. Instead use:
+        ```python
+        T_spinup_fixed = 60.0  # simulation time units >> 10*T_f ~ 29 units
+        while self.t < T_spinup_fixed:
+            # advance one step
+        ```
+        After spinup, record T_L_end = L/U_rms and set T_prod = 50 * T_L_end.
+
+    b.  **Snapshot interval**: dt_snap = 0.05 for tracers. This gives (U_rms * dt_snap) ~ 0.05 * 0.5 ~ 0.025 domain units per step — well below the 0.3 threshold. Do NOT use dt_snap = 0.3.
+
+    c.  **Verify before production**: After spinup, compute U_rms and check that U_rms * dt_snap < 0.1. If U_rms > 2.0, reduce dt_snap to 0.02.
+
+    d.  **Data directory**: All output files must be written to `/home/node/work/projects/levy_flights_2dns_v2/data/`. Create this directory if it does not exist: `os.makedirs(output_path, exist_ok=True)`.
+
+    e.  **Pre-allocate arrays**: For N_tracers=5000 and ~5000 tracer snapshots, tracer_positions.npy will be ~200 MB. Allocate a memmap or grow a list and save at the end.
+
+    f.  **GPU memory**: 1024² float32 array = 4 MB; 4 arrays in GPU memory ~ 16 MB. Fine for 96 GB VRAM.
+
 1.  **Data Loading and Initial Verification:**
 
     a.  Load the simulation data from the specified absolute paths: `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_positions.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_velocities.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/vorticity_snapshots.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/velocity_snapshots.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_times.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/vel_times.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/energy_spectrum.npy`, `/home/node/work/projects/levy_flights_2dns_v2/data/diagnostics.npy`, and `/home/node/work/projects/levy_flights_2dns_v2/data/sim_params.json`.

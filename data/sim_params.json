@@ -1,0 +1,22 @@
+{
+    "N": 1024,
+    "device": "cuda",
+    "nu_h": 1e-19,
+    "p": 4,
+    "epsilon_inj": 1.0,
+    "k_f_min": 3,
+    "k_f_max": 5,
+    "CFL": 0.4,
+    "U_max_est": 5.0,
+    "T_spinup_abs": 50.0,
+    "T_prod_TL": 50.0,
+    "N_tracers": 5000,
+    "dt_snap": 0.05,
+    "dt_vel": 2.0,
+    "output_base_path": "/home/node/work/projects/levy_flights_2dns_v2/data/",
+    "T_spinup": 50.000410577223825,
+    "T_L_at_start_of_production": 0.03960259876968821,
+    "T_prod": 1.9801299384844107,
+    "N_tracer_snaps": 40,
+    "N_vel_snaps": 1
+}

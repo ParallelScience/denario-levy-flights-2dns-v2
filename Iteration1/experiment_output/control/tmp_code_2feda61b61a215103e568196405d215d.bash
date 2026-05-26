@@ -1,0 +1,1 @@
+echo "The required data files are missing from /home/node/work/projects/levy_flights_2dns_v2/data/. Please ensure the simulation data has been generated and is available at the specified location."

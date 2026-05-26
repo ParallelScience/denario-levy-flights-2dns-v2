@@ -1,0 +1,205 @@
+[
+  {
+    "name": "control_starter",
+    "content": "",
+    "timestamp": "2026-05-26 21:55:15",
+    "cost": {
+      "Agent": [
+        "control_starter"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        6377
+      ],
+      "Completion Tokens": [
+        40
+      ],
+      "Total Tokens": [
+        6417
+      ]
+    }
+  },
+  {
+    "name": "_Group_Tool_Executor",
+    "content": "\n**Step number:** 2 out of 9.\n\n**Sub-task:** Non-Stationarity Analysis: Time-Windowed Statistics Computation\n\n**Agent in charge of sub-task:** `engineer`\n\n**Instructions:**\n\n- Define overlapping temporal windows of width `W = 8 * T_L` and step size `\u0394W = 2 * T_L`, using the initial `T_L` value from `sim_params.json`.\n- Iterate through each time window. For each window, check if it contains at least 50 tracer snapshots; if not, skip it and print a warning.\n- For each valid window:\n- Calculate tracer displacements for lags `\u03c4 = {0.5, 1, 2} * T_L`.\n- Estimate `\u03b1` using the McCulloch quantile method, implemented by calculating `\u03bd_\u03b1 = (q95 - q5) / (q75 - q25)` and interpolating from a pre-defined McCulloch (1986) lookup table.\n- Estimate `\u03b1` using the Hill estimator with the top `k = max(10, int(0.05 * N_displacements))` order statistics.\n- Compute the Mean Squared Displacement (MSD) and fit a power law to find the anomalous exponent `\u03b3`.\n- Compute the VACF and fit an algebraic decay to find the exponent `\u03bd`.\n- Calculate the average `k_peak` and `d_vv` within the window from the diagnostics data.\n- Print the results for each window (window center time, `\u03b1_McCulloch`, `\u03b1_Hill`, `\u03b3`, `\u03bd`, `k_peak`, `d_vv`) in a clear tabular format.\n- Store the complete calculated time series into a single `.npz` file for the next step.\n\n**Status:** in progress \u23f3\n",
+    "timestamp": "2026-05-26 21:55:15",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "engineer",
+    "content": "**Code Explanation:**\n\nThis script performs a non-stationarity analysis on tracer data from a 2D turbulence simulation. It loads simulation parameters, tracer positions, velocities, times, and diagnostic data. The core of the analysis involves iterating through overlapping temporal windows of a fixed width (8 times the initial large-eddy turnover time, `T_L`) and step size (2 * `T_L`).\n\nFor each window containing a sufficient number of snapshots (at least 50), the script calculates several key statistical metrics:\n1.  **L\u00e9vy Stability Index (\u03b1):** This parameter characterizes the tails of the tracer displacement probability distribution. It is estimated using two methods for cross-validation:\n    *   The **McCulloch quantile method**, which uses a ratio of sample quantiles to look up \u03b1 from a pre-computed table.\n    *   The **Hill estimator**, a classic method for tail index estimation based on the largest observed displacements.\n2.  **Anomalous Diffusion Exponent (\u03b3):** Calculated by fitting a power law to the Mean Squared Displacement (MSD) of the tracers.\n3.  **VACF Decay Exponent (\u03bd):** Calculated by fitting an algebraic decay model to the Velocity Autocorrelation Function (VACF).\n4.  **Flow Diagnostics:** The average peak wavenumber (`k_peak`) and inter-vortex distance (`d_vv`) are computed from the diagnostics data within the window.\n\nThe script prints a formatted table of these calculated metrics for each valid time window. Finally, it aggregates all the computed time series (`\u03b1(t)`, `\u03b3(t)`, `\u03bd(t)`, `k_peak(t)`, `d_vv(t)`) and saves them into a single compressed NumPy file (`.npz`) for use in subsequent analysis steps. The code is designed to handle cases where the input data is too short to form any valid windows, in which case it will issue a warning and save an empty data file.\n\n**Python Code:**\n```python\nimport json\nimport os\nimport sys\nimport numpy as np\nfrom scipy.stats import linregress\n\nMCCULLOCH_NU_ALPHA = np.array([\n    2.439, 2.483, 2.539, 2.615, 2.720, 2.879, 3.132, 3.575, 4.011, 4.590,\n    5.185, 6.220, 7.573, 9.815, 12.89, 18.61, 29.03, 54.59, 105.9, 254.1\n])\nMCCULLOCH_ALPHA = np.array([\n    2.0, 1.9, 1.8, 1.7, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1,\n    1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1\n])\n\ndef load_required_data(base_path):\n    \"\"\"\n    Loads the necessary data files for non-stationarity analysis.\n\n    Args:\n        base_path (str): The absolute path to the data directory.\n\n    Returns:\n        tuple: A tuple containing sim_params, tracer_positions, tracer_velocities,\n               tracer_times, and diagnostics.\n    \"\"\"\n    print(\"--- Loading Data for Step 2 ---\")\n    try:\n        with open(os.path.join(base_path, 'sim_params.json'), 'r') as f:\n            sim_params = json.load(f)\n        tracer_positions = np.load(os.path.join(base_path, 'tracer_positions.npy'))\n        tracer_velocities = np.load(os.path.join(base_path, 'tracer_velocities.npy'))\n        tracer_times = np.load(os.path.join(base_path, 'tracer_times.npy'))\n        diagnostics = np.load(os.path.join(base_path, 'diagnostics.npy'))\n    except FileNotFoundError as e:\n        print(\"Error: A required data file was not found.\")\n        print(e)\n        sys.exit(1)\n    print(\"Data loading complete.\")\n    return sim_params, tracer_positions, tracer_velocities, tracer_times, diagnostics\n\ndef calculate_displacements(positions, lag, domain_size=2*np.pi):\n    \"\"\"\n    Calculates tracer displacements |r(t+lag) - r(t)| with periodic boundaries.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (n_times, n_tracers, 2).\n        lag (int): The time lag in number of snapshot steps.\n        domain_size (float): The size of the periodic domain.\n\n    Returns:\n        np.ndarray: A flattened array of displacement magnitudes.\n    \"\"\"\n    delta_r = positions[lag:] - positions[:-lag]\n    delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size\n    displacements = np.sqrt(np.sum(delta_r**2, axis=2))\n    return displacements.flatten()\n\ndef estimate_alpha_mcculloch(displacements):\n    \"\"\"\n    Estimates the Levy index alpha using the McCulloch quantile method.\n\n    Args:\n        displacements (np.ndarray): Array of displacement magnitudes.\n\n    Returns:\n        float: The estimated alpha value. Returns np.nan if calculation fails.\n    \"\"\"\n    if len(displacements) < 10:\n        return np.nan\n    q = np.percentile(displacements, [5, 25, 75, 95])\n    q5, q25, q75, q95 = q[0], q[1], q[2], q[3]\n    \n    denominator = q75 - q25\n    if denominator <= 1e-9:\n        return np.nan\n        \n    nu_alpha = (q95 - q5) / denominator\n    alpha = np.interp(nu_alpha, MCCULLOCH_NU_ALPHA, MCCULLOCH_ALPHA)\n    return alpha\n\ndef estimate_alpha_hill(displacements):\n    \"\"\"\n    Estimates the Levy index alpha using the Hill estimator.\n\n    Args:\n        displacements (np.ndarray): Array of displacement magnitudes.\n\n    Returns:\n        float: The estimated alpha value. Returns np.nan if calculation fails.\n    \"\"\"\n    if len(displacements) < 20:\n        return np.nan\n        \n    k = max(10, int(0.05 * len(displacements)))\n    \n    sorted_displacements = np.sort(displacements)[::-1]\n    top_k_displacements = sorted_displacements[:k]\n    \n    x_k = top_k_displacements[-1]\n    \n    if x_k <= 1e-9:\n        return np.nan\n        \n    log_ratios = np.log(top_k_displacements / x_k)\n    mean_log_ratio = np.mean(log_ratios)\n    \n    if mean_log_ratio <= 1e-9:\n        return np.nan\n        \n    alpha = 1.0 / mean_log_ratio\n    return alpha\n\ndef estimate_gamma_msd(positions, dt_snap, max_lag_frac=0.25):\n    \"\"\"\n    Estimates the anomalous diffusion exponent gamma from the MSD.\n\n    Args:\n        positions (np.ndarray): Tracer positions for the window.\n        dt_snap (float): Time step between snapshots.\n        max_lag_frac (float): Maximum lag to use for fitting, as a fraction of window length.\n\n    Returns:\n        float: The estimated gamma value. Returns np.nan if fit fails.\n    \"\"\"\n    n_times = positions.shape[0]\n    max_lag = max(5, int(n_times * max_lag_frac))\n    if n_times <= max_lag:\n        return np.nan\n\n    lags = np.arange(1, max_lag + 1)\n    msd = np.zeros(len(lags))\n    domain_size = 2 * np.pi\n\n    for i, lag in enumerate(lags):\n        delta_r = positions[lag:] - positions[:-lag]\n        delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size\n        sq_disp = np.sum(delta_r**2, axis=2)\n        msd[i] = np.mean(sq_disp)\n\n    tau = lags * dt_snap\n    \n    valid_indices = msd > 1e-9\n    if np.sum(valid_indices) < 2:\n        return np.nan\n\n    log_tau = np.log(tau[valid_indices])\n    log_msd = np.log(msd[valid_indices])\n    \n    slope, _, _, _, _ = linregress(log_tau, log_msd)\n    return slope\n\ndef estimate_nu_vacf(velocities, dt_snap, max_lag_frac=0.25):\n    \"\"\"\n    Estimates the VACF decay exponent nu.\n\n    Args:\n        velocities (np.ndarray): Tracer velocities for the window.\n        dt_snap (float): Time step between snapshots.\n        max_lag_frac (float): Maximum lag to use for fitting, as a fraction of window length.\n\n    Returns:\n        float: The estimated nu value. Returns np.nan if fit fails.\n    \"\"\"\n    n_times = velocities.shape[0]\n    max_lag = max(5, int(n_times * max_lag_frac))\n    if n_times <= max_lag:\n        return np.nan\n\n    lags = np.arange(1, max_lag + 1)\n    vacf = np.zeros(len(lags))\n    v_sq_mean = np.mean(np.sum(velocities**2, axis=2))\n    if v_sq_mean < 1e-9:\n        return np.nan\n\n    for i, lag in enumerate(lags):\n        dot_prod = np.sum(velocities[:-lag] * velocities[lag:], axis=2)\n        vacf[i] = np.mean(dot_prod) / v_sq_mean\n\n    tau = lags * dt_snap\n    \n    valid_indices = (vacf > 1e-9) & (vacf < 0.95)\n    if np.sum(valid_indices) < 2:\n        return np.nan\n\n    log_tau = np.log(tau[valid_indices])\n    log_vacf = np.log(vacf[valid_indices])\n    \n    slope, _, _, _, _ = linregress(log_tau, log_vacf)\n    return -slope\n\ndef analyze_non_stationarity():\n    \"\"\"\n    Main function to perform the non-stationarity analysis.\n    \"\"\"\n    base_path = '/home/node/work/projects/levy_flights_2dns_v2/data/'\n    params, positions, velocities, times, diagnostics = load_required_data(base_path)\n\n    t_l_initial = params.get('T_L_at_start_of_production', 1.0)\n    dt_snap = params.get('dt_snap', 0.05)\n    \n    window_width_time = 8 * t_l_initial\n    window_step_time = 2 * t_l_initial\n\n    print(\"\\n--- Non-Stationarity Analysis Setup ---\")\n    print(\"Initial T_L: \" + str(t_l_initial))\n    print(\"Window width (W = 8*T_L): \" + str(window_width_time))\n    print(\"Window step (dW = 2*T_L): \" + str(window_step_time))\n\n    start_times = np.arange(times[0], times[-1] - window_width_time, window_step_time)\n    \n    results = []\n\n    print(\"\\n--- Processing Time Windows ---\")\n    header_str = \"{:>15s} | {:>12s} | {:>12s} | {:>8s} | {:>8s} | {:>8s} | {:>8s}\"\n    header = header_str.format(\n        \"Win Center (t)\", \"alpha_McC\", \"alpha_Hill\", \"gamma\", \"nu\", \"k_peak\", \"d_vv\"\n    )\n    print(header)\n    print(\"-\" * len(header))\n\n    for t_start in start_times:\n        t_end = t_start + window_width_time\n        \n        win_indices = np.where((times >= t_start) & (times < t_end))[0]\n        \n        if len(win_indices) < 50:\n            msg = \"Warning: Skipping window at t=\" + str(t_start) + \" due to insufficient snapshots (\" + str(len(win_indices)) + \" < 50).\"\n            print(msg)\n            continue\n\n        win_center_time = t_start + 0.5 * window_width_time\n        \n        win_pos = positions[win_indices]\n        win_vel = velocities[win_indices]\n        win_diag = diagnostics[win_indices]\n\n        lags_time = np.array([0.5, 1.0, 2.0]) * t_l_initial\n        lags_steps = np.round(lags_time / dt_snap).astype(int)\n        lags_steps = np.unique(lags_steps[lags_steps > 0])\n        \n        alphas_mcc = []\n        alphas_hill = []\n        for lag in lags_steps:\n            if lag >= len(win_indices):\n                continue\n            disps = calculate_displacements(win_pos, lag)\n            alphas_mcc.append(estimate_alpha_mcculloch(disps))\n            alphas_hill.append(estimate_alpha_hill(disps))\n        \n        avg_alpha_mcc = np.nanmean(alphas_mcc) if alphas_mcc else np.nan\n        avg_alpha_hill = np.nanmean(alphas_hill) if alphas_hill else np.nan\n\n        gamma = estimate_gamma_msd(win_pos, dt_snap)\n        nu = estimate_nu_vacf(win_vel, dt_snap)\n\n        avg_k_peak = np.mean(win_diag['k_peak'])\n        avg_d_vv = np.mean(win_diag['d_vv_estimate'])\n\n        results.append({\n            'time': win_center_time,\n            'alpha_mcc': avg_alpha_mcc,\n            'alpha_hill': avg_alpha_hill,\n            'gamma': gamma,\n            'nu': nu,\n            'k_peak': avg_k_peak,\n            'd_vv': avg_d_vv\n        })\n        \n        print(\"{:15.2f} | {:12.4f} | {:12.4f} | {:8.4f} | {:8.4f} | {:8.4f} | {:8.4f}\".format(\n            win_center_time, avg_alpha_mcc, avg_alpha_hill, gamma, nu, avg_k_peak, avg_d_vv\n        ))\n\n    if not results:\n        print(\"\\nNo valid windows found for analysis. The dataset might be too short.\")\n        time_series = {\n            'window_center_times': np.array([]), 'alpha_mcculloch': np.array([]),\n            'alpha_hill': np.array([]), 'gamma': np.array([]), 'nu': np.array([]),\n            'k_peak': np.array([]), 'd_vv': np.array([])\n        }\n    else:\n        time_series = {\n            'window_center_times': np.array([r['time'] for r in results]),\n            'alpha_mcculloch': np.array([r['alpha_mcc'] for r in results]),\n            'alpha_hill': np.array([r['alpha_hill'] for r in results]),\n            'gamma': np.array([r['gamma'] for r in results]),\n            'nu': np.array([r['nu'] for r in results]),\n            'k_peak': np.array([r['k_peak'] for r in results]),\n            'd_vv': np.array([r['d_vv'] for r in results])\n        }\n\n    output_path = os.path.join(\"data\", \"non_stationary_analysis_timeseries.npz\")\n    np.savez(output_path, **time_series)\n    print(\"\\nTime series data saved to \" + output_path)\n\nif __name__ == '__main__':\n    analyze_non_stationarity()\n```",
+    "timestamp": "2026-05-26 21:56:26",
+    "cost": {
+      "Agent": [
+        "engineer"
+      ],
+      "Model": [
+        "gemini-2.5-pro"
+      ],
+      "Cost": [
+        0.06449625
+      ],
+      "Prompt Tokens": [
+        19333
+      ],
+      "Completion Tokens": [
+        4033
+      ],
+      "Total Tokens": [
+        23366
+      ]
+    }
+  },
+  {
+    "name": "engineer_response_evaluator",
+    "content": "**Code Explanation:**\n\nThis script performs a non-stationarity analysis on tracer data from a 2D turbulence simulation. It loads simulation parameters, tracer positions, velocities, times, and diagnostic data. The core of the analysis involves iterating through overlapping temporal windows of a fixed width (8 times the initial large-eddy turnover time, `T_L`) and step size (2 * `T_L`).\n\nFor each window containing a sufficient number of snapshots (at least 50), the script calculates several key statistical metrics:\n1.  **L\u00e9vy Stability Index (\u03b1):** This parameter characterizes the tails of the tracer displacement probability distribution. It is estimated using two methods for cross-validation:\n    *   The **McCulloch quantile method**, which uses a ratio of sample quantiles to look up \u03b1 from a pre-computed table.\n    *   The **Hill estimator**, a classic method for tail index estimation based on the largest observed displacements.\n2.  **Anomalous Diffusion Exponent (\u03b3):** Calculated by fitting a power law to the Mean Squared Displacement (MSD) of the tracers.\n3.  **VACF Decay Exponent (\u03bd):** Calculated by fitting an algebraic decay model to the Velocity Autocorrelation Function (VACF).\n4.  **Flow Diagnostics:** The average peak wavenumber (`k_peak`) and inter-vortex distance (`d_vv`) are computed from the diagnostics data within the window.\n\nThe script prints a formatted table of these calculated metrics for each valid time window. Finally, it aggregates all the computed time series (`\u03b1(t)`, `\u03b3(t)`, `\u03bd(t)`, `k_peak(t)`, `d_vv(t)`) and saves them into a single compressed NumPy file (`.npz`) for use in subsequent analysis steps. The code is designed to handle cases where the input data is too short to form any valid windows, in which case it will issue a warning and save an empty data file.\n\n**Python Code:**\n\n```python\n# filename: codebase/step_2.py\nimport sys\nimport os\nsys.path.insert(0, os.path.abspath(\"codebase\"))\nsys.path.insert(0, \"/home/node/data/compsep_data/\")\nimport json\nimport os\nimport sys\nimport numpy as np\nfrom scipy.stats import linregress\n\nMCCULLOCH_NU_ALPHA = np.array([\n    2.439, 2.483, 2.539, 2.615, 2.720, 2.879, 3.132, 3.575, 4.011, 4.590,\n    5.185, 6.220, 7.573, 9.815, 12.89, 18.61, 29.03, 54.59, 105.9, 254.1\n])\nMCCULLOCH_ALPHA = np.array([\n    2.0, 1.9, 1.8, 1.7, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1,\n    1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1\n])\n\ndef load_required_data(base_path):\n    \"\"\"\n    Loads the necessary data files for non-stationarity analysis.\n\n    Args:\n        base_path (str): The absolute path to the data directory.\n\n    Returns:\n        tuple: A tuple containing sim_params, tracer_positions, tracer_velocities,\n               tracer_times, and diagnostics.\n    \"\"\"\n    print(\"--- Loading Data for Step 2 ---\")\n    try:\n        with open(os.path.join(base_path, 'sim_params.json'), 'r') as f:\n            sim_params = json.load(f)\n        tracer_positions = np.load(os.path.join(base_path, 'tracer_positions.npy'))\n        tracer_velocities = np.load(os.path.join(base_path, 'tracer_velocities.npy'))\n        tracer_times = np.load(os.path.join(base_path, 'tracer_times.npy'))\n        diagnostics = np.load(os.path.join(base_path, 'diagnostics.npy'))\n    except FileNotFoundError as e:\n        print(\"Error: A required data file was not found.\")\n        print(e)\n        sys.exit(1)\n    print(\"Data loading complete.\")\n    return sim_params, tracer_positions, tracer_velocities, tracer_times, diagnostics\n\ndef calculate_displacements(positions, lag, domain_size=2*np.pi):\n    \"\"\"\n    Calculates tracer displacements |r(t+lag) - r(t)| with periodic boundaries.\n\n    Args:\n        positions (np.ndarray): Tracer positions array of shape (n_times, n_tracers, 2).\n        lag (int): The time lag in number of snapshot steps.\n        domain_size (float): The size of the periodic domain.\n\n    Returns:\n        np.ndarray: A flattened array of displacement magnitudes.\n    \"\"\"\n    delta_r = positions[lag:] - positions[:-lag]\n    delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size\n    displacements = np.sqrt(np.sum(delta_r**2, axis=2))\n    return displacements.flatten()\n\ndef estimate_alpha_mcculloch(displacements):\n    \"\"\"\n    Estimates the Levy index alpha using the McCulloch quantile method.\n\n    Args:\n        displacements (np.ndarray): Array of displacement magnitudes.\n\n    Returns:\n        float: The estimated alpha value. Returns np.nan if calculation fails.\n    \"\"\"\n    if len(displacements) < 10:\n        return np.nan\n    q = np.percentile(displacements, [5, 25, 75, 95])\n    q5, q25, q75, q95 = q[0], q[1], q[2], q[3]\n    \n    denominator = q75 - q25\n    if denominator <= 1e-9:\n        return np.nan\n        \n    nu_alpha = (q95 - q5) / denominator\n    alpha = np.interp(nu_alpha, MCCULLOCH_NU_ALPHA, MCCULLOCH_ALPHA)\n    return alpha\n\ndef estimate_alpha_hill(displacements):\n    \"\"\"\n    Estimates the Levy index alpha using the Hill estimator.\n\n    Args:\n        displacements (np.ndarray): Array of displacement magnitudes.\n\n    Returns:\n        float: The estimated alpha value. Returns np.nan if calculation fails.\n    \"\"\"\n    if len(displacements) < 20:\n        return np.nan\n        \n    k = max(10, int(0.05 * len(displacements)))\n    \n    sorted_displacements = np.sort(displacements)[::-1]\n    top_k_displacements = sorted_displacements[:k]\n    \n    x_k = top_k_displacements[-1]\n    \n    if x_k <= 1e-9:\n        return np.nan\n        \n    log_ratios = np.log(top_k_displacements / x_k)\n    mean_log_ratio = np.mean(log_ratios)\n    \n    if mean_log_ratio <= 1e-9:\n        return np.nan\n        \n    alpha = 1.0 / mean_log_ratio\n    return alpha\n\ndef estimate_gamma_msd(positions, dt_snap, max_lag_frac=0.25):\n    \"\"\"\n    Estimates the anomalous diffusion exponent gamma from the MSD.\n\n    Args:\n        positions (np.ndarray): Tracer positions for the window.\n        dt_snap (float): Time step between snapshots.\n        max_lag_frac (float): Maximum lag to use for fitting, as a fraction of window length.\n\n    Returns:\n        float: The estimated gamma value. Returns np.nan if fit fails.\n    \"\"\"\n    n_times = positions.shape[0]\n    max_lag = max(5, int(n_times * max_lag_frac))\n    if n_times <= max_lag:\n        return np.nan\n\n    lags = np.arange(1, max_lag + 1)\n    msd = np.zeros(len(lags))\n    domain_size = 2 * np.pi\n\n    for i, lag in enumerate(lags):\n        delta_r = positions[lag:] - positions[:-lag]\n        delta_r = (delta_r + 0.5 * domain_size) % domain_size - 0.5 * domain_size\n        sq_disp = np.sum(delta_r**2, axis=2)\n        msd[i] = np.mean(sq_disp)\n\n    tau = lags * dt_snap\n    \n    valid_indices = msd > 1e-9\n    if np.sum(valid_indices) < 2:\n        return np.nan\n\n    log_tau = np.log(tau[valid_indices])\n    log_msd = np.log(msd[valid_indices])\n    \n    slope, _, _, _, _ = linregress(log_tau, log_msd)\n    return slope\n\ndef estimate_nu_vacf(velocities, dt_snap, max_lag_frac=0.25):\n    \"\"\"\n    Estimates the VACF decay exponent nu.\n\n    Args:\n        velocities (np.ndarray): Tracer velocities for the window.\n        dt_snap (float): Time step between snapshots.\n        max_lag_frac (float): Maximum lag to use for fitting, as a fraction of window length.\n\n    Returns:\n        float: The estimated nu value. Returns np.nan if fit fails.\n    \"\"\"\n    n_times = velocities.shape[0]\n    max_lag = max(5, int(n_times * max_lag_frac))\n    if n_times <= max_lag:\n        return np.nan\n\n    lags = np.arange(1, max_lag + 1)\n    vacf = np.zeros(len(lags))\n    v_sq_mean = np.mean(np.sum(velocities**2, axis=2))\n    if v_sq_mean < 1e-9:\n        return np.nan\n\n    for i, lag in enumerate(lags):\n        dot_prod = np.sum(velocities[:-lag] * velocities[lag:], axis=2)\n        vacf[i] = np.mean(dot_prod) / v_sq_mean\n\n    tau = lags * dt_snap\n    \n    valid_indices = (vacf > 1e-9) & (vacf < 0.95)\n    if np.sum(valid_indices) < 2:\n        return np.nan\n\n    log_tau = np.log(tau[valid_indices])\n    log_vacf = np.log(vacf[valid_indices])\n    \n    slope, _, _, _, _ = linregress(log_tau, log_vacf)\n    return -slope\n\ndef analyze_non_stationarity():\n    \"\"\"\n    Main function to perform the non-stationarity analysis.\n    \"\"\"\n    base_path = '/home/node/work/projects/levy_flights_2dns_v2/data/'\n    params, positions, velocities, times, diagnostics = load_required_data(base_path)\n\n    t_l_initial = params.get('T_L_at_start_of_production', 1.0)\n    dt_snap = params.get('dt_snap', 0.05)\n    \n    window_width_time = 8 * t_l_initial\n    window_step_time = 2 * t_l_initial\n\n    print(\"\\n--- Non-Stationarity Analysis Setup ---\")\n    print(\"Initial T_L: \" + str(t_l_initial))\n    print(\"Window width (W = 8*T_L): \" + str(window_width_time))\n    print(\"Window step (dW = 2*T_L): \" + str(window_step_time))\n\n    start_times = np.arange(times[0], times[-1] - window_width_time, window_step_time)\n    \n    results = []\n\n    print(\"\\n--- Processing Time Windows ---\")\n    header_str = \"{:>15s} | {:>12s} | {:>12s} | {:>8s} | {:>8s} | {:>8s} | {:>8s}\"\n    header = header_str.format(\n        \"Win Center (t)\", \"alpha_McC\", \"alpha_Hill\", \"gamma\", \"nu\", \"k_peak\", \"d_vv\"\n    )\n    print(header)\n    print(\"-\" * len(header))\n\n    for t_start in start_times:\n        t_end = t_start + window_width_time\n        \n        win_indices = np.where((times >= t_start) & (times < t_end))[0]\n        \n        if len(win_indices) < 50:\n            msg = \"Warning: Skipping window at t=\" + str(t_start) + \" due to insufficient snapshots (\" + str(len(win_indices)) + \" < 50).\"\n            print(msg)\n            continue\n\n        win_center_time = t_start + 0.5 * window_width_time\n        \n        win_pos = positions[win_indices]\n        win_vel = velocities[win_indices]\n        win_diag = diagnostics[win_indices]\n\n        lags_time = np.array([0.5, 1.0, 2.0]) * t_l_initial\n        lags_steps = np.round(lags_time / dt_snap).astype(int)\n        lags_steps = np.unique(lags_steps[lags_steps > 0])\n        \n        alphas_mcc = []\n        alphas_hill = []\n        for lag in lags_steps:\n            if lag >= len(win_indices):\n                continue\n            disps = calculate_displacements(win_pos, lag)\n            alphas_mcc.append(estimate_alpha_mcculloch(disps))\n            alphas_hill.append(estimate_alpha_hill(disps))\n        \n        avg_alpha_mcc = np.nanmean(alphas_mcc) if alphas_mcc else np.nan\n        avg_alpha_hill = np.nanmean(alphas_hill) if alphas_hill else np.nan\n\n        gamma = estimate_gamma_msd(win_pos, dt_snap)\n        nu = estimate_nu_vacf(win_vel, dt_snap)\n\n        avg_k_peak = np.mean(win_diag['k_peak'])\n        avg_d_vv = np.mean(win_diag['d_vv_estimate'])\n\n        results.append({\n            'time': win_center_time,\n            'alpha_mcc': avg_alpha_mcc,\n            'alpha_hill': avg_alpha_hill,\n            'gamma': gamma,\n            'nu': nu,\n            'k_peak': avg_k_peak,\n            'd_vv': avg_d_vv\n        })\n        \n        print(\"{:15.2f} | {:12.4f} | {:12.4f} | {:8.4f} | {:8.4f} | {:8.4f} | {:8.4f}\".format(\n            win_center_time, avg_alpha_mcc, avg_alpha_hill, gamma, nu, avg_k_peak, avg_d_vv\n        ))\n\n    if not results:\n        print(\"\\nNo valid windows found for analysis. The dataset might be too short.\")\n        time_series = {\n            'window_center_times': np.array([]), 'alpha_mcculloch': np.array([]),\n            'alpha_hill': np.array([]), 'gamma': np.array([]), 'nu': np.array([]),\n            'k_peak': np.array([]), 'd_vv': np.array([])\n        }\n    else:\n        time_series = {\n            'window_center_times': np.array([r['time'] for r in results]),\n            'alpha_mcculloch': np.array([r['alpha_mcc'] for r in results]),\n            'alpha_hill': np.array([r['alpha_hill'] for r in results]),\n            'gamma': np.array([r['gamma'] for r in results]),\n            'nu': np.array([r['nu'] for r in results]),\n            'k_peak': np.array([r['k_peak'] for r in results]),\n            'd_vv': np.array([r['d_vv'] for r in results])\n        }\n\n    output_path = os.path.join(\"data\", \"non_stationary_analysis_timeseries.npz\")\n    np.savez(output_path, **time_series)\n    print(\"\\nTime series data saved to \" + output_path)\n\nif __name__ == '__main__':\n    analyze_non_stationarity()\n```",
+    "timestamp": "2026-05-26 21:56:50",
+    "cost": {
+      "Agent": [
+        "engineer_response_evaluator"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        8928
+      ],
+      "Completion Tokens": [
+        4306
+      ],
+      "Total Tokens": [
+        13234
+      ]
+    }
+  },
+  {
+    "name": "executor",
+    "content": "Execution results:\n\nExecution output: \n--- Loading Data for Step 2 ---\nData loading complete.\n\n--- Non-Stationarity Analysis Setup ---\nInitial T_L: 0.03960259876968821\nWindow width (W = 8*T_L): 0.3168207901575057\nWindow step (dW = 2*T_L): 0.07920519753937642\n\n--- Processing Time Windows ---\n Win Center (t) |    alpha_McC |   alpha_Hill |    gamma |       nu |   k_peak |     d_vv\n-----------------------------------------------------------------------------------------\nWarning: Skipping window at t=0.0 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.07920519753937642 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.15841039507875285 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.23761559261812926 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.3168207901575057 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.39602598769688213 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.4752311852362585 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.554436382775635 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.6336415803150114 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.7128467778543878 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.7920519753937643 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.8712571729331406 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.950462370472517 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.0296675680118934 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.10887276555127 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.1880779630906464 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=1.2672831606300228 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.3464883581693992 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=1.4256935557087755 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.5048987532481521 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.5841039507875285 due to insufficient snapshots (7 < 50).\n\nNo valid windows found for analysis. The dataset might be too short.\n\nTime series data saved to data/non_stationary_analysis_timeseries.npz\n",
+    "timestamp": "2026-05-26 21:56:51",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "execution_recorder",
+    "content": "Code execution recorded.\n\nExecution output:\nExecution results:\n\nExecution output: \n--- Loading Data for Step 2 ---\nData loading complete.\n\n--- Non-Stationarity Analysis Setup ---\nInitial T_L: 0.03960259876968821\nWindow width (W = 8*T_L): 0.3168207901575057\nWindow step (dW = 2*T_L): 0.07920519753937642\n\n--- Processing Time Windows ---\n Win Center (t) |    alpha_McC |   alpha_Hill |    gamma |       nu |   k_peak |     d_vv\n-----------------------------------------------------------------------------------------\nWarning: Skipping window at t=0.0 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.07920519753937642 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.15841039507875285 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.23761559261812926 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.3168207901575057 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.39602598769688213 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.4752311852362585 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.554436382775635 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.6336415803150114 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.7128467778543878 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.7920519753937643 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=0.8712571729331406 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=0.950462370472517 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.0296675680118934 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.10887276555127 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.1880779630906464 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=1.2672831606300228 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.3464883581693992 due to insufficient snapshots (7 < 50).\nWarning: Skipping window at t=1.4256935557087755 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.5048987532481521 due to insufficient snapshots (6 < 50).\nWarning: Skipping window at t=1.5841039507875285 due to insufficient snapshots (7 < 50).\n\nNo valid windows found for analysis. The dataset might be too short.\n\nTime series data saved to data/non_stationary_analysis_timeseries.npz\n",
+    "timestamp": "2026-05-26 21:56:51",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "executor_response_evaluator",
+    "content": "",
+    "timestamp": "2026-05-26 21:56:52",
+    "cost": {
+      "Agent": [
+        "executor_response_evaluator"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        1605
+      ],
+      "Completion Tokens": [
+        73
+      ],
+      "Total Tokens": [
+        1678
+      ]
+    }
+  },
+  {
+    "name": "_Group_Tool_Executor",
+    "content": "Code execution status: success. Transfer to controller to evaluate step progress.\n\nxxxxxxxxxxxxxxxxxxxxxxxxxx\n\nWorkflow status:\n\nPlan step number: 2\n\nAgent for sub-task (might be different from the next agent suggestion for debugging): engineer\n\nStep status (before execution): in progress\n\nCode status: success\n\nxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n",
+    "timestamp": "2026-05-26 21:56:52",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "controller",
+    "content": "",
+    "timestamp": "2026-05-26 21:56:55",
+    "cost": {
+      "Agent": [
+        "controller"
+      ],
+      "Model": [
+        "gemini-2.0-flash"
+      ],
+      "Cost": [
+        0.0
+      ],
+      "Prompt Tokens": [
+        12693
+      ],
+      "Completion Tokens": [
+        130
+      ],
+      "Total Tokens": [
+        12823
+      ]
+    }
+  },
+  {
+    "name": "_Group_Tool_Executor",
+    "content": "\n**Step number:** 2 out of 9.\n\n**Sub-task:** Non-Stationarity Analysis: Time-Windowed Statistics Computation\n\n**Agent in charge of sub-task:** `engineer`\n\n**Instructions:**\n\n- Define overlapping temporal windows of width `W = 8 * T_L` and step size `\u0394W = 2 * T_L`, using the initial `T_L` value from `sim_params.json`.\n- Iterate through each time window. For each window, check if it contains at least 50 tracer snapshots; if not, skip it and print a warning.\n- For each valid window:\n- Calculate tracer displacements for lags `\u03c4 = {0.5, 1, 2} * T_L`.\n- Estimate `\u03b1` using the McCulloch quantile method, implemented by calculating `\u03bd_\u03b1 = (q95 - q5) / (q75 - q25)` and interpolating from a pre-defined McCulloch (1986) lookup table.\n- Estimate `\u03b1` using the Hill estimator with the top `k = max(10, int(0.05 * N_displacements))` order statistics.\n- Compute the Mean Squared Displacement (MSD) and fit a power law to find the anomalous exponent `\u03b3`.\n- Compute the VACF and fit an algebraic decay to find the exponent `\u03bd`.\n- Calculate the average `k_peak` and `d_vv` within the window from the diagnostics data.\n- Print the results for each window (window center time, `\u03b1_McCulloch`, `\u03b1_Hill`, `\u03b3`, `\u03bd`, `k_peak`, `d_vv`) in a clear tabular format.\n- Store the complete calculated time series into a single `.npz` file for the next step.\n\n**Step status:** failed \u274c\n\n**Code status:** success\n\n**Step iteration:** 0/10\n        ",
+    "timestamp": "2026-05-26 21:56:55",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  },
+  {
+    "name": "terminator",
+    "content": "TERMINATE",
+    "timestamp": "2026-05-26 21:56:55",
+    "cost": {
+      "Agent": [],
+      "Model": [],
+      "Cost": [],
+      "Prompt Tokens": [],
+      "Completion Tokens": [],
+      "Total Tokens": []
+    }
+  }
+]
