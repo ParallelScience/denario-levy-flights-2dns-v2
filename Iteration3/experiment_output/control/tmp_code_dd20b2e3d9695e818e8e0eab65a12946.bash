@@ -1,0 +1,1 @@
+find /home/node/work/projects/levy_flights_2dns_v2/ -name "nonstationarity_results.npz"

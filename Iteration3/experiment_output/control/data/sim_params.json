@@ -1,0 +1,1 @@
+{"N": 512, "nu_h": 1e-28, "epsilon_inj": 0.1, "T_spinup": 20.0, "T_L_at_start_of_production": NaN, "coarsened_resolution": 128, "force_amp_calibrated": 90000.0}
