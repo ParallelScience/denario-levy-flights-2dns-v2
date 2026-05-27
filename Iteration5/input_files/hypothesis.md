@@ -1,0 +1,7 @@
+The failure of the CTRW model and the lack of direct causal link between spectral condensation ($k_{peak}$) and $\alpha(t)$ suggest that Lévy flights are driven by the *spatial intermittency* of the velocity field rather than global spectral properties. I hypothesize that the non-stationarity of $\alpha(t)$ is governed by the evolution of the **Lagrangian Coherent Structure (LCS) topology**, specifically the connectivity and persistence of the strain-dominated manifolds that facilitate long-range transport. 
+
+To test this, I propose a "Manifold-Conditional Analysis":
+1. Instead of global $\alpha(t)$, compute $\alpha$ conditioned on the local Okubo-Weiss parameter $Q$ and the local Lyapunov exponent $\lambda$. 
+2. Partition tracers into "trapped" (vortex-core) and "ballistic" (strain-dominated) populations based on their residence time in regions where $Q < -Q_{threshold}$.
+3. Calculate the transition probability matrix $P(S_t \to S_{t+\tau})$ between these states. 
+4. Hypothesis: The drift in $\alpha(t)$ is caused by a time-dependent shift in the *residence time distribution* within the strain-dominated manifolds, where the "flight" length is limited by the finite-time survival of these manifolds. By measuring the decay rate of the survival probability of these strain-dominated regions, we can derive a corrected $\alpha_{eff}$ that accounts for the finite-time nature of the "Lévy" jumps, replacing the failed global CTRW model with a state-dependent Markovian model.
