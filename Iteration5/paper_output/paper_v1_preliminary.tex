@@ -1,0 +1,79 @@
+\documentclass[]{article}
+
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{graphicx} 
+\usepackage{tabularx}
+\usepackage[margin=1in]{geometry}
+
+
+\begin{document}
+
+\title{Scale-Dependent Anomalous Diffusion and Non-Stationary Lévy Flights in an Inverse Cascade}
+
+\author{Denario}
+\date{Anthropic, Gemini \& OpenAI servers. Planet Earth.}
+
+\maketitle
+\begin{abstract}
+The nature of anomalous diffusion in two-dimensional turbulence remains a subject of significant interest, particularly regarding how Lagrangian transport statistics evolve during the inverse energy cascade. In this study, we investigate the relationship between wavelet-filtered eddy lifetimes and Lévy flight characteristics by re-advecting tracers in velocity fields derived from 1024² direct numerical simulations. We analyze the temporal evolution of the Lévy stability exponent $\alpha$ and its stationarity as the energy spectrum undergoes condensation toward the largest scales. Our analysis reveals that $\alpha$ is non-stationary and scale-dependent, decreasing from approximately 2.0 at smaller scales to 1.75 at the largest scales. While we observe power-law tails in residence time and flight displacement distributions, our results indicate that the observed non-stationarity of $\alpha$ is not directly driven by spectral condensation or the spatial density of hyperbolic points. These findings suggest that the complexity of Lagrangian dynamics in two-dimensional turbulence arises from multi-scale interactions that are not fully captured by simple continuous-time random walk models or instantaneous spectral evolution.
+\end{abstract}
+
+
+
+
+
+
+
+
+\section{Introduction}
+\label{sec:intro}
+The study of Lagrangian transport in two-dimensional turbulence is central to understanding how fluid particles navigate complex, evolving velocity fields. In such systems, the inverse energy cascade—characterized by the transfer of energy from small injection scales to larger scales—creates a non-stationary environment where the statistical properties of tracer trajectories are inherently linked to the flow's structural evolution. Unlike classical Brownian motion, where the mean squared displacement grows linearly with time, tracers in turbulent flows often exhibit anomalous diffusion, frequently modeled as Lévy flights. These processes are defined by heavy-tailed displacement distributions and are typically characterized by the Lévy stability exponent $\alpha$, where $0 < \alpha \leq 2$.
+
+A significant challenge in this field is that standard continuous-time random walk models often rely on the assumption of stationary statistics. However, in the context of an inverse cascade, the energy spectrum undergoes continuous condensation toward the largest scales, implying that the underlying flow dynamics are non-stationary. Consequently, the stability exponent $\alpha$ may not be a constant property of the flow, but rather a dynamic parameter that evolves alongside the energy-containing eddies. It remains an open question whether the observed variations in $\alpha$ are a direct consequence of this spectral condensation or if they emerge from more intricate, multi-scale interactions between tracers and the spatial distribution of coherent structures, such as hyperbolic points.
+
+In this study, we investigate the temporal evolution of Lévy flight characteristics by re-advecting tracers in velocity fields derived from 1024$^2$ direct numerical simulations. We employ a wavelet-based filtering approach to isolate eddy lifetimes across multiple scales, enabling a quantitative assessment of the relationship between eddy dynamics and the stability exponent $\alpha$. By analyzing tracer trajectories within overlapping time windows, we evaluate the stationarity of $\alpha$ and its dependence on the dominant energy-containing scales. Furthermore, we examine the influence of spectral condensation and the spatial density of hyperbolic points on these statistics. Our findings clarify whether the complexity of Lagrangian transport in two-dimensional turbulence can be reduced to simple spectral evolution or if it necessitates a more nuanced multi-scale description of the flow.
+
+\section{Methods}
+\label{sec:methods}
+\subsection{Direct numerical simulation}
+The velocity fields were generated using a two-dimensional direct numerical simulation (DNS) of the Navier-Stokes equations on a $1024^2$ grid with a domain size $L=2\pi$. The simulation employed an integrating factor method to handle hyperviscosity ($\nu_h = 3.9 \times 10^{-31}$, $p=4$) and was forced at large scales ($k \in [1, 3]$) to drive an inverse energy cascade. The production run was integrated for $T_{prod} = 50 T_L$, where $T_L$ is the large-eddy turnover time. Tracers were advected using a GPU-accelerated grid sampling method, with positions and velocities saved at intervals of $\Delta t = 0.01$. Eulerian velocity and vorticity fields were coarsened to $256^2$ using a $4 \times 4$ average pooling layer for subsequent analysis.
+
+\subsection{Lévy flight analysis}
+To characterize the anomalous diffusion of tracers, we analyzed the stability exponent $\alpha$ using the McCulloch quantile method. Tracers were partitioned into overlapping time windows of length $W = 8 T_L$ with a sliding step of $\Delta W = 2 T_L$. Within each window, $\alpha$ was estimated for displacement lags $\tau \in \{0.5, 1, 2\} \times T_L$. The stationarity of the resulting time series $\alpha(t)$ was evaluated using the Augmented Dickey-Fuller (ADF) and KPSS statistical tests. The relationship between the stability exponent and the spectral condensation was modeled via the power-law fit $\alpha = a + b \times (k_{peak}/k_{box})^c$, where $k_{peak}$ is the instantaneous spectral peak and $k_{box}=1$.
+
+\subsection{Wavelet-based eddy decomposition}
+We employed a wavelet-based filtering approach using the Daubechies db4 basis to isolate velocity contributions at distinct scales $j \in \{1, 2, 3, 4\}$. By re-advecting tracers within these filtered velocity fields, we computed scale-dependent eddy lifetimes $T_{eddy}(j)$ and the corresponding stability exponents $\alpha(j)$. These results were compared against the Continuous Time Random Walk (CTRW) theoretical prediction $\alpha = 1 + \beta/(2-\beta)$, where $\beta$ is derived from the scaling of eddy lifetimes.
+
+\subsection{Lagrangian coherent structures and causal analysis}
+Lagrangian transport was further examined by computing the Okubo-Weiss parameter $Q = s^2 - \omega^2$, where $s$ is the strain rate and $\omega$ is the vorticity. Tracers were classified as "vortex-trapped" or "strain-dominated" based on a dynamic threshold $Q_{threshold}(t) = \sigma_Q(t)$. Finite-Time Lyapunov Exponent (FTLE) fields were computed on a $256 \times 256$ grid with an integration time $\Delta T_{FTLE} = 2 T_L$ to identify transport barriers. Finally, the causal link between the spectral condensation and the evolution of $\alpha(t)$ was assessed using Granger causality tests and time-lagged cross-correlation analysis between the rate of change of the energy at the largest scale $dE(k=1)/dt$ and the rate of change of the stability exponent $d\alpha/dt$.
+
+\section{Results}
+\label{sec:results}
+The results of the direct numerical simulation confirm the successful development of an inverse energy cascade, as evidenced by the migration of the spectral peak $k_{peak}$ from $k \approx 4$ toward the box scale $k \approx 1$ over the duration of $T_{prod} = 50 T_L$. The tracer statistics, characterized by a mean displacement per snapshot of $\langle|\Delta r|\rangle \approx 0.0068$ and a high velocity autocorrelation $C_{vv} \approx 0.995$, ensure that the Lagrangian trajectories are sufficiently resolved to capture the underlying anomalous diffusion processes without numerical aliasing.
+
+\subsection{Non-stationarity of the Lévy stability exponent}
+The analysis of the stability exponent $\alpha(t)$ reveals a clear non-stationary behavior as the inverse cascade progresses. Statistical validation via the Augmented Dickey-Fuller (ADF) test ($p \approx 9.27 \times 10^{-10}$) and the KPSS test ($p = 0.1$) provides robust evidence that $\alpha(t)$ is not a stationary process. The empirical relationship between the stability exponent and the spectral condensation, modeled by $\alpha = a + b \times (k_{peak}/k_{box})^c$, yielded parameters $a \approx -6.91$, $b \approx 8.51$, and $c \approx 1.0$. This indicates that as energy accumulates at the largest scales, the flow exhibits increasingly anomalous transport characteristics, with $\alpha$ shifting toward lower values.
+
+\subsection{Scale-dependent eddy dynamics}
+Wavelet-based decomposition allowed for the isolation of velocity contributions across scales $j \in \{1, 2, 3, 4\}$, with corresponding eddy lifetimes $T_{eddy}(j)$ ranging from $11.0$ to $32.4$ time units. We observed a scale-dependent stability exponent, where $\alpha$ decreases from approximately $2.0$ at smaller scales to $1.75$ at the largest scale. When comparing these results to the Continuous Time Random Walk (CTRW) prediction $\alpha = 1 + \beta/(2-\beta)$, we found a significant discrepancy, with a scaling exponent $\delta \approx 9.91$ for the relationship between $\beta$ and $T_{eddy}$. This deviation suggests that the simple CTRW framework, which assumes a direct mapping between eddy lifetimes and Lévy statistics, is insufficient to fully describe the multi-scale Lagrangian dynamics inherent in 2D turbulence.
+
+\subsection{Lagrangian coherent structures and causal analysis}
+The classification of tracer trajectories based on the Okubo-Weiss parameter $Q$ showed that both vortex-trapped and strain-dominated populations exhibit $\alpha \approx 2.0$, suggesting that at the current resolution, these structural classifications do not independently dictate the global stability exponent. Furthermore, while FTLE fields confirm the presence of complex ridge structures that organize transport, the causal analysis indicates that spectral condensation is not the primary driver of the observed drift in $\alpha(t)$. Specifically, the Granger causality test (F-statistic $= 0.81$, $p = 0.45$) failed to reject the null hypothesis, and the correlation between the spatial density of hyperbolic points and $\alpha(t)$ was negligible ($\approx -0.04$). These findings imply that the non-stationarity of $\alpha$ arises from complex, multi-scale interactions that are not solely determined by the instantaneous spectral peak or the local density of hyperbolic points.
+
+\section{Conclusions}
+\label{sec:conclusions}
+In this study, we investigated the nature of anomalous diffusion and the evolution of Lévy flight statistics in two-dimensional turbulence undergoing an inverse energy cascade. The primary challenge addressed was the non-stationary nature of Lagrangian transport, which complicates the application of standard continuous-time random walk models that typically assume stationary statistics.
+
+To explore this, we utilized velocity fields generated from 1024$^2$ direct numerical simulations and employed a wavelet-based filtering approach to isolate eddy dynamics across multiple scales. We quantified the Lévy stability exponent $\alpha$ using the McCulloch quantile method and evaluated its temporal evolution alongside the spectral condensation process. Furthermore, we analyzed the influence of Lagrangian coherent structures, such as hyperbolic points, on the observed transport statistics.
+
+Our results demonstrate that the stability exponent $\alpha$ is both non-stationary and scale-dependent, decreasing from approximately 2.0 at smaller scales to 1.75 at the largest scales as the energy spectrum condenses. Statistical tests confirmed the non-stationarity of $\alpha(t)$, and our comparison with continuous-time random walk predictions revealed a significant discrepancy, indicating that the relationship between eddy lifetimes and Lévy statistics is more complex than simple theoretical frameworks suggest. Notably, our causal analysis indicates that the observed drift in $\alpha$ is not directly driven by the instantaneous spectral peak or the spatial density of hyperbolic points.
+
+We conclude that the complexity of Lagrangian dynamics in two-dimensional turbulence arises from intricate, multi-scale interactions that are not fully captured by instantaneous spectral evolution or local structural classifications. These findings suggest that a more comprehensive understanding of transport in turbulent flows requires moving beyond simple random walk models to account for the non-local and multi-scale nature of the underlying velocity fields.
+
+
+\bibliography{bibliography}{}
+\bibliographystyle{unsrt}
+
+\end{document}

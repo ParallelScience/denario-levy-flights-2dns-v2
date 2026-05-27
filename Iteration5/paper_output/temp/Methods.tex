@@ -1,0 +1,24 @@
+\documentclass[]{article}
+
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{graphicx} 
+\usepackage[margin=1in]{geometry}
+
+\begin{document}
+
+\subsection{Direct numerical simulation}
+The velocity fields were generated using a two-dimensional direct numerical simulation (DNS) of the Navier-Stokes equations on a $1024^2$ grid with a domain size $L=2\pi$. The simulation employed an integrating factor method to handle hyperviscosity ($\nu_h = 3.9 \times 10^{-31}$, $p=4$) and was forced at large scales ($k \in [1, 3]$) to drive an inverse energy cascade. The production run was integrated for $T_{prod} = 50 T_L$, where $T_L$ is the large-eddy turnover time. Tracers were advected using a GPU-accelerated grid sampling method, with positions and velocities saved at intervals of $\Delta t = 0.01$. Eulerian velocity and vorticity fields were coarsened to $256^2$ using a $4 \times 4$ average pooling layer for subsequent analysis.
+
+\subsection{Lévy flight analysis}
+To characterize the anomalous diffusion of tracers, we analyzed the stability exponent $\alpha$ using the McCulloch quantile method. Tracers were partitioned into overlapping time windows of length $W = 8 T_L$ with a sliding step of $\Delta W = 2 T_L$. Within each window, $\alpha$ was estimated for displacement lags $\tau \in \{0.5, 1, 2\} \times T_L$. The stationarity of the resulting time series $\alpha(t)$ was evaluated using the Augmented Dickey-Fuller (ADF) and KPSS statistical tests. The relationship between the stability exponent and the spectral condensation was modeled via the power-law fit $\alpha = a + b \times (k_{peak}/k_{box})^c$, where $k_{peak}$ is the instantaneous spectral peak and $k_{box}=1$.
+
+\subsection{Wavelet-based eddy decomposition}
+We employed a wavelet-based filtering approach using the Daubechies db4 basis to isolate velocity contributions at distinct scales $j \in \{1, 2, 3, 4\}$. By re-advecting tracers within these filtered velocity fields, we computed scale-dependent eddy lifetimes $T_{eddy}(j)$ and the corresponding stability exponents $\alpha(j)$. These results were compared against the Continuous Time Random Walk (CTRW) theoretical prediction $\alpha = 1 + \beta/(2-\beta)$, where $\beta$ is derived from the scaling of eddy lifetimes.
+
+\subsection{Lagrangian coherent structures and causal analysis}
+Lagrangian transport was further examined by computing the Okubo-Weiss parameter $Q = s^2 - \omega^2$, where $s$ is the strain rate and $\omega$ is the vorticity. Tracers were classified as "vortex-trapped" or "strain-dominated" based on a dynamic threshold $Q_{threshold}(t) = \sigma_Q(t)$. Finite-Time Lyapunov Exponent (FTLE) fields were computed on a $256 \times 256$ grid with an integration time $\Delta T_{FTLE} = 2 T_L$ to identify transport barriers. Finally, the causal link between the spectral condensation and the evolution of $\alpha(t)$ was assessed using Granger causality tests and time-lagged cross-correlation analysis between the rate of change of the energy at the largest scale $dE(k=1)/dt$ and the rate of change of the stability exponent $d\alpha/dt$.
+
+\end{document}
+                

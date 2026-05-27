@@ -1,0 +1,18 @@
+\documentclass[]{article}
+
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{graphicx} 
+\usepackage[margin=1in]{geometry}
+
+\begin{document}
+
+The study of Lagrangian transport in two-dimensional turbulence is central to understanding how fluid particles navigate complex, evolving velocity fields. In such systems, the inverse energy cascade—characterized by the transfer of energy from small injection scales to larger scales—creates a non-stationary environment where the statistical properties of tracer trajectories are inherently linked to the flow's structural evolution. Unlike classical Brownian motion, where the mean squared displacement grows linearly with time, tracers in turbulent flows often exhibit anomalous diffusion, frequently modeled as Lévy flights. These processes are defined by heavy-tailed displacement distributions and are typically characterized by the Lévy stability exponent $\alpha$, where $0 < \alpha \leq 2$.
+
+A significant challenge in this field is that standard continuous-time random walk models often rely on the assumption of stationary statistics. However, in the context of an inverse cascade, the energy spectrum undergoes continuous condensation toward the largest scales, implying that the underlying flow dynamics are non-stationary. Consequently, the stability exponent $\alpha$ may not be a constant property of the flow, but rather a dynamic parameter that evolves alongside the energy-containing eddies. It remains an open question whether the observed variations in $\alpha$ are a direct consequence of this spectral condensation or if they emerge from more intricate, multi-scale interactions between tracers and the spatial distribution of coherent structures, such as hyperbolic points.
+
+In this study, we investigate the temporal evolution of Lévy flight characteristics by re-advecting tracers in velocity fields derived from 1024$^2$ direct numerical simulations. We employ a wavelet-based filtering approach to isolate eddy lifetimes across multiple scales, enabling a quantitative assessment of the relationship between eddy dynamics and the stability exponent $\alpha$. By analyzing tracer trajectories within overlapping time windows, we evaluate the stationarity of $\alpha$ and its dependence on the dominant energy-containing scales. Furthermore, we examine the influence of spectral condensation and the spatial density of hyperbolic points on these statistics. Our findings clarify whether the complexity of Lagrangian transport in two-dimensional turbulence can be reduced to simple spectral evolution or if it necessitates a more nuanced multi-scale description of the flow.
+
+\end{document}
+                

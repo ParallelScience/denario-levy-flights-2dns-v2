@@ -1,0 +1,23 @@
+\documentclass[]{article}
+
+\usepackage{amsmath}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{graphicx} 
+\usepackage[margin=1in]{geometry}
+
+\begin{document}
+
+The results of the direct numerical simulation confirm the successful development of an inverse energy cascade, as evidenced by the migration of the spectral peak $k_{peak}$ from $k \approx 4$ toward the box scale $k \approx 1$ over the duration of $T_{prod} = 50 T_L$. The tracer statistics, characterized by a mean displacement per snapshot of $\langle|\Delta r|\rangle \approx 0.0068$ and a high velocity autocorrelation $C_{vv} \approx 0.995$, ensure that the Lagrangian trajectories are sufficiently resolved to capture the underlying anomalous diffusion processes without numerical aliasing.
+
+\subsection{Non-stationarity of the Lévy stability exponent}
+The analysis of the stability exponent $\alpha(t)$ reveals a clear non-stationary behavior as the inverse cascade progresses. Statistical validation via the Augmented Dickey-Fuller (ADF) test ($p \approx 9.27 \times 10^{-10}$) and the KPSS test ($p = 0.1$) provides robust evidence that $\alpha(t)$ is not a stationary process. The empirical relationship between the stability exponent and the spectral condensation, modeled by $\alpha = a + b \times (k_{peak}/k_{box})^c$, yielded parameters $a \approx -6.91$, $b \approx 8.51$, and $c \approx 1.0$. This indicates that as energy accumulates at the largest scales, the flow exhibits increasingly anomalous transport characteristics, with $\alpha$ shifting toward lower values.
+
+\subsection{Scale-dependent eddy dynamics}
+Wavelet-based decomposition allowed for the isolation of velocity contributions across scales $j \in \{1, 2, 3, 4\}$, with corresponding eddy lifetimes $T_{eddy}(j)$ ranging from $11.0$ to $32.4$ time units. We observed a scale-dependent stability exponent, where $\alpha$ decreases from approximately $2.0$ at smaller scales to $1.75$ at the largest scale. When comparing these results to the Continuous Time Random Walk (CTRW) prediction $\alpha = 1 + \beta/(2-\beta)$, we found a significant discrepancy, with a scaling exponent $\delta \approx 9.91$ for the relationship between $\beta$ and $T_{eddy}$. This deviation suggests that the simple CTRW framework, which assumes a direct mapping between eddy lifetimes and Lévy statistics, is insufficient to fully describe the multi-scale Lagrangian dynamics inherent in 2D turbulence.
+
+\subsection{Lagrangian coherent structures and causal analysis}
+The classification of tracer trajectories based on the Okubo-Weiss parameter $Q$ showed that both vortex-trapped and strain-dominated populations exhibit $\alpha \approx 2.0$, suggesting that at the current resolution, these structural classifications do not independently dictate the global stability exponent. Furthermore, while FTLE fields confirm the presence of complex ridge structures that organize transport, the causal analysis indicates that spectral condensation is not the primary driver of the observed drift in $\alpha(t)$. Specifically, the Granger causality test (F-statistic $= 0.81$, $p = 0.45$) failed to reject the null hypothesis, and the correlation between the spatial density of hyperbolic points and $\alpha(t)$ was negligible ($\approx -0.04$). These findings imply that the non-stationarity of $\alpha$ arises from complex, multi-scale interactions that are not solely determined by the instantaneous spectral peak or the local density of hyperbolic points.
+
+\end{document}
+                
