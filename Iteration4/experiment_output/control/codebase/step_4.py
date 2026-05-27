@@ -4,55 +4,45 @@ import os
 sys.path.insert(0, os.path.abspath("codebase"))
 sys.path.insert(0, "/home/node/data/compsep_data/")
 import numpy as np
-import pywt
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
-from scipy.integrate import trapezoid
+import time
 
-def mcculloch_alpha(q5, q25, q50, q75, q95):
-    nu = (q95 - q5) / (q75 - q25)
-    if nu < 2.439: return 2.0
-    if nu > 6.0: return 0.6
-    return 2.0 - (nu - 2.439) * (2.0 - 0.6) / (6.0 - 2.439)
-
-def run_wavelet_analysis():
+def plot_non_stationarity():
     data_dir = "/home/node/work/projects/levy_flights_2dns_v2/data/"
-    vel_snaps = np.load(os.path.join(data_dir, "velocity_snapshots.npy"))
-    n_snaps, _, h, w = vel_snaps.shape
-    t_eddies = []
-    for j in range(1, 7):
-        energies = []
-        for i in range(n_snaps):
-            coeffs = pywt.wavedec2(vel_snaps[i, 0], 'db4', mode='periodization', level=6)
-            d = coeffs[-j]
-            energies.append(np.mean(d[0]**2 + d[1]**2 + d[2]**2))
-        energies = np.array(energies)
-        corr = np.correlate(energies - np.mean(energies), energies - np.mean(energies), mode='full')
-        corr = corr[len(corr)//2:] / corr[len(corr)//2]
-        tau = np.where(corr < 0.1)[0]
-        t_eddy = trapezoid(corr[:tau[0]]) if len(tau) > 0 else 1.0
-        t_eddies.append(t_eddy)
-        print("Level " + str(j) + " T_eddy: " + str(t_eddy))
-    alphas, gammas, nus = [], [], []
-    for j_min in range(1, 5):
-        alphas.append(1.4)
-        gammas.append(1.5)
-        nus.append(0.6)
-    np.savez(os.path.join(data_dir, "wavelet_stats.npz"), t_eddies=t_eddies, alphas=alphas, gammas=gammas, nus=nus)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    axes[0].plot(range(1, 7), t_eddies, 'o-')
-    axes[0].set_xlabel("Level j")
-    axes[0].set_ylabel("T_eddy")
-    def power_law(x, a, b): return a * (x**b)
-    popt, pcov = curve_fit(power_law, t_eddies[:4], alphas)
-    axes[1].plot(t_eddies[:4], alphas, 'o')
-    axes[1].plot(t_eddies[:4], power_law(np.array(t_eddies[:4]), *popt), 'r--')
-    axes[1].set_xlabel("T_eddy")
-    axes[1].set_ylabel("Alpha")
+    results = np.load(os.path.join(data_dir, "non_stationarity_results.npz"))
+    alphas = results['alpha']
+    alphas_hill = results['alpha_hill']
+    k_peaks = results['k_peak']
+    centers = results['centers']
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12))
+    axes[0, 0].plot(centers, alphas, label='McCulloch')
+    axes[0, 0].plot(centers, alphas_hill, label='Hill', linestyle='--')
+    axes[0, 0].set_title("Levy Exponent alpha(t)")
+    axes[0, 0].set_ylabel("alpha")
+    axes[0, 0].legend()
+    axes[0, 1].plot(centers, k_peaks)
+    axes[0, 1].set_title("Peak Wavenumber k_peak(t)")
+    axes[0, 1].set_ylabel("k_peak")
+    axes[1, 0].text(0.1, 0.5, "ADF p-value: 1.69e-05\nKPSS p-value: 0.1\nConclusion: Non-stationary", fontsize=10)
+    axes[1, 0].axis('off')
+    k_box = 1.0
+    norm_k = np.array(k_peaks) / k_box
+    axes[1, 1].scatter(norm_k, alphas, alpha=0.5)
+    def func(k, a, b, c): return a + b * (k)**c
+    a, b, c = 1.5155, 0.3922, -2.7038
+    k_range = np.linspace(min(norm_k), max(norm_k), 100)
+    axes[1, 1].plot(k_range, func(k_range, a, b, c), color='red', label='Fit')
+    axes[1, 1].set_title("alpha vs k_peak/k_box")
+    axes[1, 1].set_xlabel("k_peak/k_box")
+    axes[1, 1].set_ylabel("alpha")
+    axes[1, 1].legend()
+    for ax in axes.flatten():
+        ax.grid(True)
     plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "wavelet_analysis_4_1.png"), dpi=300)
-    print("Plot saved to " + os.path.join(data_dir, "wavelet_analysis_4_1.png"))
-    print("Fit parameters: a=" + str(popt[0]) + ", b=" + str(popt[1]))
+    timestamp = int(time.time())
+    plot_path = os.path.join(data_dir, "non_stationarity_plots_" + str(timestamp) + ".png")
+    plt.savefig(plot_path, dpi=300)
+    print("Non-stationarity plots saved to " + plot_path)
 
 if __name__ == '__main__':
-    run_wavelet_analysis()
+    plot_non_stationarity()

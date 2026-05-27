@@ -1,0 +1,1 @@
+{"N": 1024, "nu_h": 1e-19, "epsilon_inj": 0.1, "dt_snap": 0.05, "dt_vel": 2.0, "T_spinup": 20.0, "T_prod": 1000.0, "force_amp": 326522.21875}

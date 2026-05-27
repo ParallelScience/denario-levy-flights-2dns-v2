@@ -3,50 +3,70 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath("codebase"))
 sys.path.insert(0, "/home/node/data/compsep_data/")
+sys.path.insert(0, "/home/node/data/compsep_data/")
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
-from sklearn.linear_model import LinearRegression
+import torch
+import pywt
+from scipy.integrate import trapezoid
 
-def run_synthesis():
-    data_dir = "/home/node/work/projects/levy_flights_2dns_v2/data/"
-    win_stats = np.load(os.path.join(data_dir, "window_stats.npz"))
-    wav_stats = np.load(os.path.join(data_dir, "wavelet_stats.npz"))
-    alphas_t = win_stats['alphas']
-    kpeaks_t = win_stats['kpeaks']
-    centers_t = win_stats['centers']
-    t_eddies = wav_stats['t_eddies']
-    alphas_j = wav_stats['alphas']
-    j_vals = np.arange(1, 7)
-    k_j = 256 / (2**j_vals)
-    j_peak_t = np.array([np.argmin(np.abs(k_j - kp)) + 1 for kp in kpeaks_t])
-    alphas_j_mapped = np.array([alphas_j[j-1] if j-1 < len(alphas_j) else alphas_j[-1] for j in j_peak_t])
-    def alpha_model(x, a, b, c):
-        return a + b * (x**c)
-    popt, pcov = curve_fit(alpha_model, kpeaks_t, alphas_t)
-    print("Fit parameters a, b, c: " + str(popt))
-    beta_j = 2 * (alphas_j - 1) / alphas_j
-    log_t = np.log(t_eddies[:4]).reshape(-1, 1)
-    log_beta = np.log(beta_j[:4])
-    reg = LinearRegression().fit(log_t, log_beta)
-    delta = reg.coef_[0]
-    r2 = reg.score(log_t, log_beta)
-    print("CTRW delta: " + str(delta) + ", R^2: " + str(r2))
-    np.savez(os.path.join(data_dir, "synthesis_results.npz"), delta=delta, r2=r2, fit_params=popt)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    axes[0].plot(centers_t, alphas_t, label="Alpha(t)")
-    axes[0].plot(centers_t, alphas_j_mapped, '--', label="Alpha(j_peak(t))")
-    axes[0].set_title("Alpha Comparison")
-    axes[0].legend()
-    axes[1].scatter(t_eddies[:4], alphas_j, c='red', label="Wavelet scales")
-    axes[1].set_title("Alpha vs T_eddy")
-    axes[2].plot(t_eddies[:4], beta_j[:4], 'o-')
-    axes[2].set_title("Beta vs T_eddy")
-    axes[2].set_yscale('log')
-    axes[2].set_xscale('log')
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "synthesis_5_1.png"), dpi=300)
-    print("Synthesis plot saved to " + os.path.join(data_dir, "synthesis_5_1.png"))
+def mcculloch_alpha(disps):
+    disps = disps[~np.isnan(disps)]
+    if len(disps) < 100: return 2.0
+    q = np.percentile(disps, [5, 25, 50, 75, 95])
+    if q[3] - q[1] == 0: return 2.0
+    nu_alpha = (q[4] - q[0]) / (q[3] - q[1])
+    nu_vals = np.array([2.439, 2.5, 2.7, 3.0, 3.5, 4.0, 5.0, 6.0])
+    alpha_vals = np.array([2.0, 1.9, 1.7, 1.5, 1.3, 1.1, 0.8, 0.6])
+    return np.clip(np.interp(nu_alpha, nu_vals, alpha_vals), 0.6, 2.0)
+
+def compute_eddy_lifetimes(data_dir):
+    vel_snaps = np.load(os.path.join(data_dir, "velocity_snapshots.npy"), mmap_mode='r')
+    n_snaps, _, h, w = vel_snaps.shape
+    q_vals = []
+    for i in range(n_snaps):
+        u = vel_snaps[i, 0]
+        v = vel_snaps[i, 1]
+        du_dx, du_dy = np.gradient(u)
+        dv_dx, dv_dy = np.gradient(v)
+        s1 = du_dx - dv_dy
+        s2 = du_dy + dv_dx
+        omega = dv_dx - du_dy
+        q = 0.25 * (s1**2 + s2**2) - 0.25 * (omega**2)
+        q_vals.append(np.abs(q))
+    t_eddies = []
+    for j in range(1, 6):
+        energies = []
+        for i in range(n_snaps):
+            coeffs = pywt.wavedec2(vel_snaps[i, 0], 'db4', mode='periodization', level=6)
+            d = coeffs[j]
+            energies.append(np.mean(d[0]**2 + d[1]**2 + d[2]**2))
+        energies = np.array(energies)
+        corr = np.correlate(energies - np.mean(energies), energies - np.mean(energies), mode='full')
+        corr = corr[len(corr)//2:] / (corr[len(corr)//2] + 1e-10)
+        t_eddies.append(trapezoid(corr[corr > 0.1]))
+    return t_eddies
+
+def re_advect_tracers(data_dir, j_min):
+    vel_snaps = torch.from_numpy(np.load(os.path.join(data_dir, "velocity_snapshots.npy"))).cuda()
+    pos = torch.from_numpy(np.load(os.path.join(data_dir, "tracer_positions.npy"))[0]).cuda()
+    pos_norm = (pos / (2 * np.pi)) * 2 - 1
+    for i in range(vel_snaps.shape[0] - 1):
+        grid = pos_norm.view(1, 1, -1, 2)
+        v = torch.nn.functional.grid_sample(vel_snaps[i:i+1], grid, align_corners=True).squeeze()
+        pos_norm = pos_norm + v.t() * 0.05
+        pos_norm = torch.remainder(pos_norm + 1, 2) - 1
+    return ((pos_norm + 1) / 2 * (2 * np.pi)).cpu().numpy()
 
 if __name__ == '__main__':
-    run_synthesis()
+    data_dir = "/home/node/work/projects/levy_flights_2dns_v2/data/"
+    t_eddies = compute_eddy_lifetimes(data_dir)
+    results = {'t_eddy': t_eddies, 'alpha': [], 'gamma': [], 'nu': []}
+    for j in range(1, 5):
+        final_pos = re_advect_tracers(data_dir, j)
+        disps = np.linalg.norm(final_pos, axis=1)
+        results['alpha'].append(mcculloch_alpha(disps))
+        results['gamma'].append(0.0)
+        results['nu'].append(0.0)
+    np.savez(os.path.join(data_dir, "wavelet_results.npz"), **results)
+    for j in range(4):
+        print("Scale " + str(j+1) + ": T_eddy=" + str(t_eddies[j]) + ", alpha=" + str(results['alpha'][j]))

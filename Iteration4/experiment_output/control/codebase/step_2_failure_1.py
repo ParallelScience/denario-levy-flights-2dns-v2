@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import time
 
 def verify_data():
-    data_dir = "/home/node/work/projects/levy_flights_2dns_v2/data/"
+    data_dir = "data/"
     tracer_pos = np.load(os.path.join(data_dir, "tracer_positions.npy"))
     tracer_vel = np.load(os.path.join(data_dir, "tracer_velocities.npy"))
     energy_spec = np.load(os.path.join(data_dir, "energy_spectrum.npy"))

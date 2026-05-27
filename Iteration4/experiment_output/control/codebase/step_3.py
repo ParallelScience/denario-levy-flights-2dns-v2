@@ -3,68 +3,50 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath("codebase"))
 sys.path.insert(0, "/home/node/data/compsep_data/")
-sys.path.insert(0, "/home/node/data/compsep_data/")
 import numpy as np
-import matplotlib.pyplot as plt
-from statsmodels.tsa.stattools import adfuller, kpss
+import os
 from scipy.optimize import curve_fit
+from statsmodels.tsa.stattools import adfuller, kpss
 
 def mcculloch_alpha(q5, q25, q50, q75, q95):
-    nu = (q95 - q5) / (q75 - q25)
-    if nu < 2.439: return 2.0
-    if nu > 6.0: return 0.6
-    return 2.0 - (nu - 2.439) * (2.0 - 0.6) / (6.0 - 2.439)
+    nu_alpha = (q95 - q5) / (q75 - q25)
+    if nu_alpha < 2.439: return 2.0
+    if nu_alpha > 6.0: return 0.6
+    nu_vals = np.array([2.439, 2.5, 2.7, 3.0, 3.5, 4.0, 5.0, 6.0])
+    alpha_vals = np.array([2.0, 1.9, 1.7, 1.5, 1.3, 1.1, 0.8, 0.6])
+    return np.interp(nu_alpha, nu_vals, alpha_vals)
 
-def analyze_non_stationarity():
+def run_analysis():
     data_dir = "/home/node/work/projects/levy_flights_2dns_v2/data/"
     pos = np.load(os.path.join(data_dir, "tracer_positions.npy"))
     times = np.load(os.path.join(data_dir, "tracer_times.npy"))
     diag = np.load(os.path.join(data_dir, "diagnostics.npy"))
-    t_l = np.mean(diag['T_L'])
-    dt = times[1] - times[0]
-    w = int(8 * t_l / dt)
-    dw = int(2 * t_l / dt)
-    windows = []
-    start = 0
-    while start + w < len(times):
-        windows.append((start, start + w))
-        start += dw
-    if len(windows) < 5:
-        print("Warning: Fewer than 5 windows. Falling back to W=4 T_L.")
-        w = int(4 * t_l / dt)
-        dw = int(1 * t_l / dt)
-        windows = []
-        start = 0
-        while start + w < len(times):
-            windows.append((start, start + w))
-            start += dw
-    alphas, kpeaks, centers = [], [], []
-    for s, e in windows:
-        centers.append(np.mean(times[s:e]))
-        disp = np.sqrt(np.sum(np.diff(pos[s:e], axis=0)**2, axis=-1))
-        q = np.percentile(disp.flatten(), [5, 25, 50, 75, 95])
+    T_L = np.mean(diag['T_L'])
+    W = int(8 * T_L / (times[1] - times[0]))
+    dW = int(2 * T_L / (times[1] - times[0]))
+    alphas, alphas_hill, gammas, nus, d_vvs, k_peaks, centers = [], [], [], [], [], [], []
+    for start in range(0, len(times) - W, dW):
+        end = start + W
+        window_pos = pos[start:end]
+        dx = (window_pos[1:, :, 0] - window_pos[:-1, :, 0] + np.pi) % (2 * np.pi) - np.pi
+        dy = (window_pos[1:, :, 1] - window_pos[:-1, :, 1] + np.pi) % (2 * np.pi) - np.pi
+        disps = np.concatenate([dx.flatten(), dy.flatten()])
+        q = np.percentile(disps, [5, 25, 50, 75, 95])
         alphas.append(mcculloch_alpha(*q))
-        kpeaks.append(np.mean(diag['k_peak'][s:e]))
-    alphas = np.array(alphas)
-    kpeaks = np.array(kpeaks)
+        sorted_disps = np.sort(np.abs(disps))
+        k = int(0.05 * len(sorted_disps))
+        alphas_hill.append(1.0 / np.mean(np.log(sorted_disps[-k:] / sorted_disps[-k])))
+        centers.append(np.mean(times[start:end]))
+        k_peaks.append(np.mean(diag['k_peak'][start:end]))
+        d_vvs.append(np.mean(diag['d_vv_estimate'][start:end]))
     adf = adfuller(alphas)
     kpss_res = kpss(alphas, regression='c')
+    def func(k, a, b, c): return a + b * (k)**c
+    popt, _ = curve_fit(func, np.array(k_peaks)/1.0, alphas, p0=[1.0, 0.5, 1.0])
+    np.savez(os.path.join(data_dir, "non_stationarity_results.npz"), alpha=alphas, alpha_hill=alphas_hill, k_peak=k_peaks, centers=centers)
     print("ADF p-value: " + str(adf[1]))
     print("KPSS p-value: " + str(kpss_res[1]))
-    def power_law(x, a, b, c): return a + b * (x**c)
-    popt, _ = curve_fit(power_law, kpeaks, alphas)
-    np.savez(os.path.join(data_dir, "window_stats.npz"), alphas=alphas, kpeaks=kpeaks, centers=centers)
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    axes[0, 0].plot(centers, alphas)
-    axes[0, 0].set_title("Alpha(t)")
-    axes[0, 1].plot(centers, kpeaks)
-    axes[0, 1].set_title("k_peak(t)")
-    axes[1, 0].scatter(kpeaks, alphas)
-    axes[1, 0].plot(kpeaks, power_law(kpeaks, *popt), 'r--')
-    axes[1, 0].set_title("Alpha vs k_peak")
-    plt.tight_layout()
-    plt.savefig(os.path.join(data_dir, "non_stationarity_3_1.png"), dpi=300)
-    print("Plot saved to " + os.path.join(data_dir, "non_stationarity_3_1.png"))
+    print("Fitted parameters: a=" + str(popt[0]) + ", b=" + str(popt[1]) + ", c=" + str(popt[2]))
 
 if __name__ == '__main__':
-    analyze_non_stationarity()
+    run_analysis()

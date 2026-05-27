@@ -6,6 +6,7 @@ sys.path.insert(0, "/home/node/data/compsep_data/")
 import numpy as np
 import torch
 import pywt
+from scipy.integrate import trapz
 
 def mcculloch_alpha(disps):
     q = np.percentile(disps, [5, 25, 50, 75, 95])
@@ -39,7 +40,7 @@ def compute_eddy_lifetimes(data_dir):
         energies = np.array(energies)
         corr = np.correlate(energies - np.mean(energies), energies - np.mean(energies), mode='full')
         corr = corr[len(corr)//2:] / corr[len(corr)//2]
-        t_eddies.append(np.trapz(corr[corr > 0.1]))
+        t_eddies.append(trapz(corr[corr > 0.1]))
     return t_eddies
 
 def re_advect_tracers(data_dir, j_min):
