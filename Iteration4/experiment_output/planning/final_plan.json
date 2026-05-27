@@ -1,0 +1,85 @@
+{
+    "sub_tasks": [
+        {
+            "bullet_points": [
+                "Implement a GPU-accelerated pseudo-spectral 2D Navier-Stokes solver in vorticity-streamfunction form using PyTorch (device='cuda') with N=1024, domain [0,2π]², forcing at k∈[3,5] (as mandated by the problem statement — no large-scale drag), hyperviscosity ν_h=1e-19, p=4 (8th-order)",
+                "Use the integrating factor method: IF = exp(diss_op × dt) where diss_op = -ν_h × k^(2p); apply de-aliasing with the 2/3 rule (682 active modes per direction)",
+                "Calibrate force_amp empirically at startup to achieve ε_inj ≈ 0.1; use RK4 time integration with adaptive CFL < 0.4",
+                "After each RK4 substep, check all spectral coefficients for NaN/Inf; if any non-finite value is detected, halt immediately with a diagnostic message reporting the simulation time and the offending mode",
+                "Run spinup until T/T_L ≥ 10 (monitor T_L = 2π/U_rms where U_rms = sqrt(2×E_total)); save diagnostics only during spinup; after spinup print U_rms, T_L, k_peak — k_peak should be visibly below k_f=4",
+                "At end of spinup, seed N_tracers=5000 uniformly at random; run production for T_prod = 50×T_L_spinup_end",
+                "Save tracer positions and velocities at Δt_snap=0.05; save coarsened Eulerian velocity (1024→256) and vorticity fields at Δt_vel=2.0",
+                "Save energy_spectrum.npy with shape (N_tracer_snaps, 512) and diagnostics.npy as a structured array with all seven fields: (time, E_total, E_rms, omega_rms, T_L, k_peak, d_vv_estimate); verify shapes before closing files",
+                "Save all output files to /home/node/work/projects/levy_flights_2dns_v2/data/ with exact shapes and dtypes from the problem statement; save sim_params.json with all key parameters"
+            ],
+            "sub_task": "DNS simulation — spinup and production run with tracer advection at N=1024",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load tracer_positions.npy, tracer_velocities.npy, tracer_times.npy, energy_spectrum.npy, diagnostics.npy from the data directory",
+                "Verify N_tracer_snaps ≥ 5000 and T_prod ≈ 50×T_L; if N_tracer_snaps < 1000, halt with a clear error message; print actual N_tracer_snaps and T_prod achieved vs targets",
+                "Compute mean tracer displacement per snapshot ⟨|Δr(1 step)|⟩ with periodic wrapping (wrap differences into [-π, π]); report whether it is < 0.3×2π ≈ 1.88; if it exceeds this threshold, print a prominent warning",
+                "Compute VACF C_vv(τ) at lags τ = 1, 2, 4, 8, 16 steps; report C_vv(1) and the decorrelation time τ_corr (first lag where C_vv drops below 1/e); C_vv(1) should be > 0.3",
+                "Plot E(k) at t = 0.1, 0.3, 0.6, 1.0 × T_prod on a log-log plot to confirm k_peak drifts from ~3-5 at early times toward lower k; mark k_peak at each time",
+                "Produce a single multi-panel figure with: E(k) evolution, mean displacement per step, and VACF vs lag; save to data directory",
+                "Save all computed verification statistics (mean displacement, C_vv values at each lag, τ_corr, N_tracer_snaps, T_prod) to a json file"
+            ],
+            "sub_task": "Verify snapshot quality, inverse cascade, and VACF memory",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load all simulation data; compute T_L from diagnostics; define overlapping windows of width W=8 T_L, step ΔW=2 T_L; if the number of windows is fewer than 5, fall back to W=4 T_L and step=1 T_L and print a clear notice",
+                "For each window: extract tracer displacement distributions at lags τ={0.5,1,2}×T_L; apply McCulloch quantile estimator using ν_α = (q95-q5)/(q75-q25) interpolated from the McCulloch (1986) table; clamp ν_α to the valid table range and print a warning if clamping occurs; also compute Hill estimator as cross-check",
+                "For each window: fit MSD(τ) power law to get γ(t); fit VACF algebraic decay to get ν(t); extract d_vv(t) and k_peak(t) from diagnostics averaged over the window",
+                "Apply ADF and KPSS stationarity tests to the α(t) time series; print test statistics and p-values",
+                "Save all window-level statistics (α_McCulloch, α_Hill, γ, ν, d_vv, k_peak, window_center_times) to an npz file",
+                "Produce a multi-panel figure: α(t), γ(t), ν(t), k_peak(t) vs time; and a separate panel with α(t) vs k_peak(t)/k_box with power-law fit α = a + b×(k_peak/k_box)^c; print all fit parameters with uncertainties"
+            ],
+            "sub_task": "Non-stationarity analysis — compute α(t), γ(t), ν(t), k_peak(t) in overlapping windows",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load velocity_snapshots.npy with shape (N_vel_snaps, 2, 256, 256); apply 2D DWT using PyWavelets with db4 wavelet in periodic mode up to level J=6 on each snapshot",
+                "For each level j=1..6: compute wavelet energy E_j(x,y,t) = Σ_d |D_j^d(x,y,t)|²; compute temporal autocorrelation C_E(τ,j) averaged over all spatial positions; integrate C_E until it drops below 0.1 using trapezoidal rule to get T_eddy(j); print T_eddy(j) for each level",
+                "Reconstruct filtered velocity fields ũ_j for j_min ∈ {1,2,3,4} by zeroing detail coefficients below j_min; these filtered fields have the same shape as the input snapshots",
+                "Re-advect the 5000 tracers starting from their initial positions at t=0 of the production run (first row of tracer_positions.npy) in each filtered field ũ_j; use RK4 integration with linear temporal interpolation between saved filtered velocity snapshots (interpolate in time between the two nearest snapshots bracketing the current tracer time); run re-advection over the full production run duration",
+                "For each filtered field j_min: compute α(j) via McCulloch estimator on displacement distributions, γ_MSD(j) from MSD power-law fit, ν_VACF(j) from VACF algebraic decay fit; print all values",
+                "Save T_eddy(j), α(j), γ(j), ν(j) for all levels to an npz file",
+                "Produce a two-panel figure: T_eddy(j) vs wavelet level j; and α(j) vs T_eddy(j) with a power-law fit; print fit parameters with standard errors"
+            ],
+            "sub_task": "Wavelet decomposition, eddy-lifetime estimation, and scale-dependent tracer re-advection",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load window-level statistics from Step 3 (α_McCulloch(t), k_peak(t)) and scale-dependent statistics from Step 4 (α(j), T_eddy(j))",
+                "Map each window's k_peak(t) to the dominant wavelet scale j_peak(t) by matching k_peak to the characteristic wavenumber k_j ≈ 256/2^j for the 256-grid; overlay α(t) and α(j_peak(t)) on a time-series plot",
+                "Construct a 2D scatter map of α as a function of (T_eddy, k_peak/k_box) combining both temporal window results and wavelet-scale results; k_box = 1",
+                "Fit α = a + b×(k_peak/k_box)^c to the combined dataset using scipy curve_fit; print a, b, c with their standard errors",
+                "Test the CTRW prediction: for each wavelet level j, extract β(j) = 2(α(j)-1)/α(j) (derived from α = 1+β/(2-β) rearranged as β = 2(α-1)/α); fit β ∝ T_eddy^δ using log-linear regression; print δ with its standard error and R² value",
+                "Save all synthesis statistics (fit parameters, β values, δ) to an npz file",
+                "Produce a multi-panel synthesis figure: (1) α(t) vs α(j_peak(t)) overlay, (2) 2D scatter map of α vs (T_eddy, k_peak/k_box), (3) β(j) vs T_eddy(j) with power-law fit; save to data directory"
+            ],
+            "sub_task": "Synthesis — compare α(t) vs α(j), 2D map, stationarity conclusion, CTRW test",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Report the simulation parameters actually used (N, ν_h, forcing band, drag, Δt_snap, T_prod, N_tracers) and explicitly note any deviations from the problem statement's nominal parameters; compare against the prior v1 Iteration 4 setup",
+                "Report all verification statistics from Step 2: mean displacement per step, C_vv(1), τ_corr, N_tracer_snaps achieved, T_prod achieved, and the E(k) evolution confirming the inverse cascade",
+                "Report all non-stationarity results from Step 3: number of windows used, α_McCulloch(t) and α_Hill(t) ranges and trends, γ(t) and ν(t) ranges, ADF and KPSS test statistics and p-values, and the fit parameters (a, b, c) for α vs k_peak/k_box",
+                "Report all wavelet results from Step 4: T_eddy(j) for each level j=1..6, α(j) for each j_min ∈ {1,2,3,4}, γ_MSD(j), ν_VACF(j), and the power-law fit parameters for α vs T_eddy",
+                "Report all synthesis results from Step 5: the comparison of α(t) vs α(j_peak(t)), the 2D α map description, the CTRW test outcome including β(j) values and the fitted δ exponent with standard error and R²",
+                "Compare all obtained α values against the prior result α≈1.4±0.1 from v1 Iteration 4; discuss whether α is stationary or drifts with spectral condensation; assess whether the CTRW prediction α=1+β/(2-β) with β∝T_eddy^δ is supported by the data",
+                "Write in full academic paper Results section style with subsections for: Simulation Verification, Non-Stationarity Analysis, Wavelet Decomposition and Eddy-Lifetime Scaling, and Synthesis"
+            ],
+            "sub_task": "Write full Results section of the paper",
+            "sub_task_agent": "researcher"
+        }
+    ]
+}
