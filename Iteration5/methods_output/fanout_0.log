@@ -1,0 +1,332 @@
+
+###### PROMPT BEGINS ########
+Human: You are provided with:
+- a description of the data
+- an idea
+- research plan to carry out the idea.
+
+Your task is to provide suggestions on how to improve the plan.
+Take into account and potential feedback (if any).
+If the plan is already good enough, do not give suggestions to improve it. If this is not first iteration, you will also be provided with the previous research plan along with some feedback on it. If this is the case, take into account the feedback provided when designing the new research plan. It is good to have a detailed plan, but not to have an overly complicated plan. If you dont have suggestions, just say that you dont have further suggestions. The idea should remain the same. No need to add code to the research plan, as another agent will write code given the research plan.
+
+Data description:
+# Lévy Flights in 2D Turbulence: Wavelet-Filtered Tracer Advection and Non-Stationary Analysis (v2)
+
+## Research Objectives
+
+This project addresses two open questions from levy_flights_2dns_v1 (6 iterations):
+
+1. **Wavelet-based eddy-lifetime scaling of Lévy flights**: Decompose the 2D velocity field into wavelet scales, re-advect tracers in each filtered field, vary eddy lifetime by retaining different scale ranges, and test whether α scales with T_eddy(j) as CTRW theory predicts.
+
+2. **Non-stationarity analysis across multiple time windows**: Run a long-duration DNS (T >> 50 T_L), divide into overlapping temporal windows, and measure how α(t), γ(t), ν(t), d_vv(t), k_peak(t) evolve as the inverse cascade develops. Test whether α ≈ 1.4 (found in v1 Iter 4) is stationary or drifts with spectral condensation.
+
+## Iteration 0 Failure — Fixed in This Iteration
+
+Iteration 0 failed because:
+1. Snapshots were saved at Δt_snap = 0.30 — too coarse. Tracers moved O(1) domain widths per step (σ_displacement ≈ 1.8 ≈ π/√3 at every lag), completely washing out Lévy tail statistics.
+2. Energy was already condensed at k_peak ≈ 1 from t=0, so the evolving inverse cascade was not captured.
+3. VACF was zero at all lags — no velocity memory resolvable.
+
+Fixes applied in this iteration:
+- Δt_snap ≤ 0.05 (6× finer), targeting ≥ 5000 tracer snapshots over T_prod = 50 T_L
+- Forcing at k ∈ [3, 5] instead of [1, 3], so inverse cascade develops from k~4 toward k~1
+- Proper spinup: run until T/T_L ≥ 10 before seeding tracers
+- Eulerian velocity snapshots saved at coarser Δt_vel = 2.0 (manageable storage)
+
+## Simulation Design
+
+### Solver
+GPU-accelerated pseudo-spectral 2D Navier-Stokes in vorticity-streamfunction form:
+    ∂ω/∂t + (u · ∇)ω = ν_h (-1)^p ∇^(2p) ω + f
+- Domain: [0, 2π] × [0, 2π], doubly periodic
+- Resolution: N = 1024 × 1024 (de-aliased with 2/3 rule → 682 active modes per direction)
+  **This resolution is mandatory — do not reduce to 512² or lower.**
+- Time integration: RK4 with adaptive dt, CFL < 0.4
+- Forcing: stochastic white-in-time at k ∈ [3, 5], constant energy injection rate ε_inj = 0.1
+- Dissipation: hyperviscosity ν_h = 1e-19, p = 4 (8th-order). No large-scale drag.
+- Use PyTorch (device='cuda') for all spectral transforms (torch.fft.rfft2 / irfft2)
+
+### Run duration and snapshot strategy
+- **Spinup**: run until T/T_L ≥ 10 (fully developed inverse cascade, k_peak visibly below k_f=4)
+  - During spinup: save diagnostics only (no tracer/velocity snapshots)
+  - Monitor T_L from the energy spectrum: T_L ≈ L / U_rms where U_rms = sqrt(2 E_total / N²)
+- **Production**: run for T_prod = 50 × T_L_spinup_end after spinup
+- **Tracer snapshot interval**: Δt_snap = 0.05 (targeting ~5000 snapshots over production run)
+  - This must satisfy: (tracer_speed × Δt_snap) << L_domain, i.e., U_rms × 0.05 << 2π
+  - At U_rms ~ 1.0–2.0, displacement per step ~ 0.05–0.10 domain units — adequate for tracking
+- **Eulerian velocity snapshot interval**: Δt_vel = 2.0 (every 40th tracer snapshot)
+  - Save at Δt_vel to keep velocity_snapshots.npy manageable (≤ 5 GB)
+- Storage estimate at N=1024, 5000 tracer snapshots:
+  - tracer_positions.npy: 5000 × 5000 × 2 × 4 bytes ≈ 200 MB ✓
+  - velocity_snapshots.npy (at 256² coarsened): (T_prod/2.0) × 2 × 256 × 256 × 4 ≈ manageable
+  - vorticity_snapshots.npy (at 256² coarsened): same order ✓
+
+### Passive tracers
+- N_tracers = 5000 tracers seeded uniformly at random at the START of the production run
+- Advected by bilinear spectral interpolation at every tracer snapshot step
+- Periodic boundary conditions
+- Record tracer positions AND velocities at every tracer snapshot
+
+## Output Files (ABSOLUTE PATHS — mandatory)
+
+All output files written to `/home/node/work/projects/levy_flights_2dns_v2/data/`:
+
+- `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_positions.npy`
+  Shape: (N_tracer_snaps, N_tracers, 2), dtype float32. Positions in [0, 2π].
+- `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_velocities.npy`
+  Shape: (N_tracer_snaps, N_tracers, 2), dtype float32. Interpolated (u, v) at tracer positions.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/vorticity_snapshots.npy`
+  Shape: (N_vel_snaps, 256, 256), dtype float32. Coarsened (1024→256) vorticity at Δt_vel.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/velocity_snapshots.npy`
+  Shape: (N_vel_snaps, 2, 256, 256), dtype float32. Coarsened (u,v) at Δt_vel. For wavelet analysis.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/tracer_times.npy`
+  Shape: (N_tracer_snaps,), dtype float64. Times of tracer snapshots (production run only).
+- `/home/node/work/projects/levy_flights_2dns_v2/data/vel_times.npy`
+  Shape: (N_vel_snaps,), dtype float64. Times of Eulerian velocity snapshots.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/energy_spectrum.npy`
+  Shape: (N_tracer_snaps, N//2), dtype float64. Azimuthally-averaged E(k, t) at tracer snapshot times.
+- `/home/node/work/projects/levy_flights_2dns_v2/data/diagnostics.npy`
+  Structured array: fields = (time, E_total, E_rms, omega_rms, T_L, k_peak, d_vv_estimate).
+  Shape: (N_tracer_snaps,).
+- `/home/node/work/projects/levy_flights_2dns_v2/data/sim_params.json`
+  JSON: N, dt_actual, nu_h, epsilon_inj, N_tracers, N_tracer_snaps, N_vel_snaps,
+        dt_snap, dt_vel, T_spinup, T_prod, T_L_at_start_of_production.
+
+## Analysis Tasks
+
+### Task 1: Verify snapshot quality and inverse cascade
+
+a. Compute the mean tracer displacement per snapshot: ⟨|Δr(1 step)|⟩ = ⟨|r(t+Δt_snap) - r(t)|⟩.
+   This MUST be < 0.3 domain units (i.e., < 0.3 × 2π ≈ 1.88). If it exceeds this, the snapshot interval is too coarse for meaningful Lévy statistics — report the issue and stop.
+b. Compute the VACF C_vv(τ) at short lags (τ = 1, 2, 4, 8, 16 steps). At τ=1, C_vv should be > 0.3 (non-negligible memory). Report the decorrelation time τ_corr.
+c. Confirm the inverse cascade: plot E(k) at t = 0.1, 0.3, 0.6, 1.0 × T_prod. k_peak should drift from ~4 at t=0 toward ~1–2 by t=T_prod.
+
+### Task 2: Non-stationarity analysis
+
+Define overlapping windows of width W = 8 T_L, step ΔW = 2 T_L (~26 windows). For each window:
+a. Fit Lévy-stable α via McCulloch quantile method (fast, O(N)) at lags τ = {0.5, 1, 2} T_L.
+   The McCulloch estimator uses 5 sample quantiles (p5, p25, p50, p75, p95):
+   ν_α = (q95 - q5) / (q75 - q25), then interpolate from the published McCulloch (1986) table.
+   Also compute Hill estimator as a cross-check: α_Hill = 1 / mean(log(X_(i)/X_(k))) for top-k order stats.
+b. Fit MSD(τ) power law → γ(t).
+c. Fit VACF algebraic decay → ν(t).
+d. Extract d_vv(t), k_peak(t) from diagnostics.
+
+Output: α(t), γ(t), ν(t), d_vv(t), k_peak(t). Test stationarity (ADF + KPSS tests).
+Plot α(t) vs k_peak(t)/k_box and fit α = a + b × (k_peak/k_box)^c.
+
+### Task 3: Wavelet decomposition and eddy-lifetime scaling
+
+Use `velocity_snapshots.npy` (coarsened to 256²). Engineer chooses wavelet basis — justify choice based on:
+- Compact support (avoid ringing): Daubechies db4/db6 or Symlets sym6 recommended
+- Orthogonality for energy decomposition
+- Boundary treatment for periodic domain (periodic mode in PyWavelets)
+
+Steps:
+a. Apply 2D DWT decomposition level by level to each velocity snapshot. Extract approximation (A_j) and detail (D_j = {H,V,D}) coefficients at each level j = 1, …, J (J = floor(log2(256)) = 8, but use J=6 for stability).
+b. Reconstruct filtered fields ũ_j for j_min ∈ {1, 2, 3, 4} by zeroing out detail coefficients below j_min.
+c. For each scale j, estimate eddy lifetime T_eddy(j) from temporal autocorrelation of wavelet energy:
+   E_j(x,y,t) = sum_d |D_j^d(x,y,t)|², then C_E(τ,j) = ⟨E_j(x,y,t) E_j(x,y,t+τ)⟩ / ⟨E_j²⟩
+   T_eddy(j) = ∫_0^∞ C_E(τ,j) dτ  (trapezoidal, integrate until C_E drops below 0.1)
+d. Re-advect tracers in each filtered field ũ_j using saved tracer positions as seeds.
+   Use the filtered velocity fields to interpolate tracer velocities, then integrate with RK4.
+e. For each filtered field: compute α(j), γ_MSD(j), ν_VACF(j).
+f. Plot α(j) vs T_eddy(j). Fit α = f(T_eddy) and report functional form.
+   Test CTRW prediction: if β ∝ T_eddy^δ, then α = 1 + β/(2−β).
+
+### Task 4: Synthesis
+
+a. Compare α(t) from Task 2 with α(j) from Task 3 at the dominant wavelet scale (j corresponding to k_peak(t)).
+b. 2D map of α as function of (T_eddy, k_peak/k_box).
+c. State whether α is stationary or condenses with the inverse cascade.
+
+## Key Physical Predictions
+
+1. α < 2 (non-Gaussian) observed at T >> T_L once hyperbolic manifolds are resolved
+2. α decreases (heavier tails) as T_eddy increases — larger eddies produce more ballistic flights
+3. α(t) drifts toward lower values as k_peak → k_box (flow becomes more anomalous as condensation progresses)
+4. CTRW prediction α = 1 + β/(2−β) holds with β(j) ∝ T_eddy(j)^δ
+
+## Hardware
+
+- NVIDIA RTX PRO 6000 Blackwell Edition (96 GB VRAM), CUDA 13.0 — use for 1024² spectral solver
+- 64 vCPUs, 128 GB RAM — use for post-processing (limit to 8–16 workers)
+- PyWavelets (pywt) installed in /opt/denario-venv
+- Storage: /home/node/work/projects/levy_flights_2dns_v2/data/ (several GB available)
+
+## Prior Results Context
+
+From levy_flights_2dns_v1 Iteration 4 (best):
+- α ≈ 1.4 ± 0.1, VACF decay ν ≈ 0.61–0.72
+- Two-channel ejection: vortex death (2.6%) + strain stripping (97.4%)
+- Jump length scaling L ~ d_vv^0.63 (non-universal, χ² p < 0.001)
+- MSD ratio ~3.9, kurtosis ratio ~0.4, S6 ratio ~5.5 (model inconsistency)
+
+Key lesson: need T >> 50 T_L AND Δt_snap << τ_corr to resolve LCS and Lévy statistics.
+
+
+Idea:
+**Title:** Scale-Dependent Anomalous Diffusion and Non-Stationary Lévy Flights in an Inverse Cascade
+
+**Description:** Investigate the relationship between wavelet-filtered eddy lifetimes and Lévy flight characteristics by re-advecting tracers in velocity fields filtered at wavelet scales j ∈ {1, 2, 3, 4}. Quantify the scaling exponent δ in β(j) ∝ T_eddy(j)^δ, predicting α = 1 + β/(2−β), using the velocity snapshots coarsened to 256². Simultaneously, analyze the temporal evolution of the global energy spectrum, extracting k_peak(t) to identify the dominant wavelet scale j_peak(t) corresponding to k_peak(t) at overlapping time windows of width W = {4, 8, 12} T_L. Compare α(t) computed from tracer trajectories within each window to α(j_peak(t)) derived from wavelet-filtered advection, employing both McCulloch and Hill estimators for α to assess estimator sensitivity. Perform Augmented Dickey-Fuller and Kwiatkowski-Phillips-Schmidt-Shin tests on α(t) to determine the stationarity of Lévy flight behavior, evaluating how stationarity depends on window size W.
+\
+
+Research plan:
+1. **DNS Execution and Inverse Cascade Development**:
+   - Execute the 2D Navier-Stokes solver on a $1024 \times 1024$ grid using the specified GPU-accelerated pseudo-spectral method.
+   - Maintain the inverse cascade by forcing at $k \in [3, 5]$ with $\epsilon_{inj} = 0.1$.
+   - Run the simulation until $T/T_L \geq 10$ for spinup, then proceed to the production phase for $T_{prod} = 50 \times T_L$.
+   - Save tracer positions at $\Delta t_{snap} = 0.05$ and Eulerian velocity/vorticity fields at $\Delta t_{vel} = 2.0$.
+
+2. **Verification of Snapshot Quality**:
+   - Compute the mean tracer displacement $\langle|\Delta r|\rangle$ per snapshot; ensure it remains $< 0.3$ domain units to prevent statistical washout.
+   - Calculate the Velocity Autocorrelation Function (VACF) $C_{vv}(\tau)$ at short lags to confirm that the decorrelation time $\tau_{corr}$ is well-resolved by the snapshot interval.
+   - Verify the inverse cascade by plotting the energy spectrum $E(k, t)$ at multiple intervals to confirm the drift of $k_{peak}$ from $k \approx 4$ toward $k \approx 1$.
+
+3. **Non-Stationary Lévy Analysis**:
+   - Divide the production run into overlapping temporal windows of width $W = 8 T_L$ with a step of $\Delta W = 2 T_L$.
+   - For each window, estimate the Lévy stability index $\alpha(t)$ using the McCulloch quantile method at lags $\tau = \{0.5, 1, 2\} T_L$.
+   - Perform the Hill estimator as a secondary check to assess sensitivity.
+   - Apply Augmented Dickey-Fuller (ADF) and Kwiatkowski-Phillips-Schmidt-Shin (KPSS) tests to $\alpha(t)$ to rigorously quantify the non-stationarity of the diffusion process.
+
+4. **Lagrangian Coherent Structure (LCS) Identification**:
+   - Compute the Okubo-Weiss parameter $Q = s^2 - \omega^2$ from the Eulerian velocity snapshots.
+   - Identify coherent vortices as regions where $Q > Q_{threshold}$ and strain-dominated regions where $Q < -Q_{threshold}$ (using the 75th percentile of $|Q|$ as the threshold).
+   - Calculate the spatial density of hyperbolic points (where $Q < -Q_{threshold}$) for each snapshot to serve as a proxy for the intensity of strain-stripping events.
+
+5. **FTLE Field Computation**:
+   - Compute the Finite-Time Lyapunov Exponent (FTLE) fields using the velocity snapshots to map the stable and unstable manifolds of the flow.
+   - Integrate the flow map $\Phi_{t}^{t+\Delta t}$ using the saved velocity snapshots to identify the ridges of the FTLE field, which represent the hyperbolic manifolds driving ballistic transport.
+
+6. **Residence Time and Flight Time Distribution**:
+   - Track individual tracer trajectories and categorize segments as "trapped" (residing within a coherent vortex, $Q > Q_{threshold}$) or "flight" (traversing strain-dominated regions, $Q < -Q_{threshold}$).
+   - Extract the probability distribution of residence times within vortices and flight times between vortices.
+   - Test whether the distribution of flight times follows a power-law consistent with the observed $\alpha(t)$.
+
+7. **Causal Link Analysis**:
+   - Perform a cross-correlation analysis between the rate of change of energy at the largest scales ($dE(k_{min})/dt$) and the rate of change of the Lévy index $d\alpha(t)/dt$.
+   - Evaluate the correlation between the spatial density of hyperbolic points and the instantaneous value of $\alpha(t)$ to determine if the drift in $\alpha$ is driven by the evolution of the flow's Lagrangian geometry.
+
+8. **Synthesis of Results**:
+   - Construct a 2D map of $\alpha$ as a function of the hyperbolic point density and $k_{peak}/k_{box}$.
+   - Synthesize the findings to conclude whether the non-stationarity of $\alpha$ is a direct consequence of the spectral condensation and the resulting reorganization of the flow's Lagrangian coherent structures.
+
+Previous research plan:
+0. **DNS Implementation — MANDATORY ENGINEERING NOTES (do not deviate):**
+
+   This iteration is identical to Iteration 3 with ONE change: N = 1024 (higher resolution). All other physics parameters, numerical schemes, and analysis steps are unchanged.
+
+   a. **Grid:** N = 1024. Domain L = 2π. dx = L/N.
+   b. **Forcing band:** k_force_min = 10, k_force_max = 12 (unchanged from Iteration 3).
+   c. **Hyperviscosity:** nu_h = 3.9e-31, p = 4. This is nu_h_512 / 2^8 = 1e-28/256, scaled so dissipation at the dealiasing cutoff k_max~341 matches that of the 512² run.
+   d. **Integrating factor method (IF):** MANDATORY. Do NOT use explicit RK4 for the hyperviscous term. The IF handles the stiff dissipation exactly:
+      ```python
+      diss_op = -nu_h * k2**p          # shape: (N, N//2+1)
+      IF = torch.exp(diss_op * dt)     # recompute when dt changes by >1%
+      # RK4 on nonlinear term only:
+      k1 = nonlinear(omega_hat)
+      k2_ = nonlinear(omega_hat + 0.5*dt*k1)
+      k3 = nonlinear(omega_hat + 0.5*dt*k2_)
+      k4 = nonlinear(omega_hat + dt*k3)
+      omega_new = IF * (omega_hat + dt*(k1 + 2*k2_ + 2*k3 + k4)/6)
+      # Stochastic forcing kick (one per step, Ito convention):
+      phi = torch.exp(2j*np.pi*torch.rand(omega_hat.shape, device=device))
+      omega_new = omega_new + (force_amp * np.sqrt(dt)) * phi * force_mask
+      ```
+   e. **Force amplitude calibration (MANDATORY):** Calibrate empirically at startup:
+      ```python
+      omega_calib = torch.zeros(N, N//2+1, dtype=torch.cfloat, device=device)
+      dE_acc = 0.0; dt_cal = 0.1
+      for _ in range(20):
+          E0 = get_energy(omega_calib)
+          phi = torch.exp(2j*np.pi*torch.rand(omega_calib.shape, device=device))
+          omega_calib += np.sqrt(dt_cal) * phi * force_mask
+          dE_acc += get_energy(omega_calib) - E0
+      dE_per_amp2 = dE_acc / (20 * dt_cal)
+      force_amp = float(np.sqrt(epsilon_inj / dE_per_amp2))
+      ```
+      where get_energy returns E = (0.5/N^4) * sum_k(|u_hat|^2 + |v_hat|^2). For N=1024 with epsilon_inj=0.1, expect force_amp ≈ 160,000–200,000 (scales as N^2 relative to 512²).
+   f. **Wavenumber convention:** Integer wavenumbers (NOT physical):
+      ```python
+      k  = torch.fft.fftfreq(N, d=1.0/N)   # [0,1,...,N/2-1,-N/2,...,-1]
+      kr = torch.fft.rfftfreq(N, d=1.0/N)  # [0,1,...,N/2]
+      kx, ky = torch.meshgrid(k, kr, indexing='ij')
+      k2 = kx**2 + ky**2;  k2_nz = k2.clone(); k2_nz[0,0] = 1.0
+      ```
+   g. **Spinup:** T_spinup = 20.0. Monitor k_peak; proceed to production when T_spinup reached.
+   h. **CFL:** dt = min(0.4 * dx / U_max, 0.5). Use dt=0.05 for cold start before U builds up.
+   i. **Snapshot intervals:** dt_snap = 0.01 (tracers), dt_vel = 0.5 (Eulerian fields coarsened 1024→256 by AvgPool2d(4)).
+   j. **Tracers:** N_tracers = 5000, seeded uniformly at start of production. Tracer advection uses GPU grid_sample; map positions: pos_norm = (pos/(2*pi))*2 - 1.
+   k. **Output directory:** /home/node/work/projects/levy_flights_2dns_v2/data/ (overwrite).
+   l. **NaN/Inf guard:** After each step check torch.any(torch.isnan(omega_hat)) and raise RuntimeError if triggered.
+   m. **Verification before production:** Print U_rms, T_L, k_peak. Require: U_rms*dt_snap < 0.1; T_L finite; k_peak ≥ 2.
+   n. **GPU:** All tensors on device='cuda'. Use torch.fft.rfft2/irfft2 throughout.
+
+1. **DNS Execution**:
+   - Perform the 2D Navier-Stokes simulation on a $1024 \times 1024$ grid using the GPU-accelerated pseudo-spectral solver with integrating factor method.
+   - Enforce the inverse cascade by forcing at $k \in [10, 12]$ with $\epsilon_{inj} = 0.1$.
+   - Monitor $k_{peak}$ during spinup. Proceed to production after T_spinup = 20.0.
+   - Run the production phase for $T_{prod} = 50 \times T_L$, saving tracer positions at $\Delta t_{snap} = 0.01$ and coarsened (1024→256) Eulerian fields at $\Delta t_{vel} = 0.5$.
+
+2. **Data Quality and Cascade Validation**:
+   - Compute mean tracer displacement $\langle|\Delta r|\rangle$ per snapshot; must be $< 0.3 \times 2\pi \approx 1.88$.
+   - Calculate VACF $C_{vv}(\tau)$ to confirm velocity memory at short lags ($C_{vv}(\tau=1) > 0.3$).
+   - Plot $E(k, t)$ at $t = 0.1, 0.3, 0.6, 1.0 \times T_{prod}$; confirm $k_{peak}$ drifts toward smaller $k$.
+
+3. **Non-Stationary Lévy Analysis**:
+   - Overlapping windows of width $W = 8 T_L$, step $\Delta W = 2 T_L$.
+   - Estimate $\alpha$ per window using McCulloch quantile method (scalar x and y displacements separately; take median across lags $\tau = \{0.5, 1, 2\} \times T_L$).
+   - CCDF log-log plots per window; flag windows with < 1.5 decades of power-law as non-Lévy.
+   - ADF and KPSS stationarity tests on $\alpha(t)$, $\gamma(t)$, $\nu(t)$.
+   - Fit $\alpha = a + b(k_{peak}/k_{box})^c$.
+
+4. **Wavelet-Filtered Eddy Dynamics**:
+   - Velocity snapshots are at 256×256 resolution. Apply 2D DWT using `db4` basis for levels $j=1,\dots,5$.
+   - Compute Okubo-Weiss parameter $Q = s^2 - \omega^2$. When computing $T_{eddy}(j)$, use only pixels where $Q < -Q_{threshold}$ (set $Q_{threshold}$ to the 75th percentile of $|Q|$).
+   - $T_{eddy}(j)$: integrate temporal autocorrelation of spatially-averaged wavelet energy until it drops below 0.1, max lag = min(T_prod/4, 50*dt_vel).
+
+5. **Tracer Re-advection and Scaling Laws**:
+   - Re-advect 5000 tracers through each filtered velocity field $\tilde{u}_j$ using GPU-accelerated RK4 with linear temporal interpolation between snapshots.
+   - Compute $\alpha(j)$, $\gamma_{MSD}(j)$, $\nu_{VACF}(j)$.
+   - Plot $\alpha(j)$ vs $T_{eddy}(j)$; fit and test CTRW prediction $\alpha = 1 + \beta/(2-\beta)$.
+
+6. **Synthesis and Correlation**:
+   - Correlate $\alpha(t)$ with $k_{peak}(t)$.
+   - 2D map of $\alpha$ vs $(T_{eddy}, k_{peak}/k_{box})$.
+   - Conclude on stationarity of $\alpha$ across the inverse cascade evolution.
+
+
+Feedback on previous research plan:
+The current analysis successfully confirms the non-stationarity of $\alpha(t)$ and its link to spectral condensation, providing a robust validation of the inverse cascade dynamics. However, the failure of the wavelet-filtered fields to reproduce the Lévy behavior ($\alpha \approx 2.0$) indicates a significant methodological gap in how the filtered fields are being utilized.
+
+**Critical Weaknesses and Gaps:**
+1. **Filtering Artifacts:** The wavelet filtering (zeroing out detail coefficients) effectively removes the small-scale velocity fluctuations that generate the strain-stripping and vortex-death events identified in v1. By "smoothing" the field, you have likely destroyed the hyperbolic manifolds (LCS) that drive ballistic transport, forcing the tracers into a Gaussian regime ($\alpha \approx 2$).
+2. **Scale-Lifetime Decoupling:** The finding that $\delta \approx 0$ suggests that $T_{eddy}(j)$ is not the sole driver of $\alpha$. The current approach assumes a direct mapping between wavelet scale and eddy lifetime, but in 2D turbulence, the inverse cascade is characterized by the merger of coherent vortices. These structures are not well-represented by orthogonal wavelet bases (like `db4`), which are better suited for stationary, homogeneous signals.
+3. **Redundant Analysis:** The current wavelet filtering approach is yielding null results for the core hypothesis. Repeating this exact filtering method in future iterations will not yield new insights.
+
+**Actionable Recommendations:**
+1. **Shift from Wavelet Filtering to Lagrangian Coherent Structure (LCS) Analysis:** Instead of wavelet-based filtering, use the `velocity_snapshots.npy` to compute the Finite-Time Lyapunov Exponent (FTLE) fields. The "Lévy flights" are likely occurring along the stable/unstable manifolds of the flow. Quantify the correlation between $\alpha(t)$ and the spatial density of hyperbolic points (where $Q < -Q_{threshold}$). This directly tests the "vortex death/strain stripping" hypothesis from v1.
+2. **Re-evaluate the CTRW Mapping:** The CTRW prediction $\alpha = 1 + \beta/(2-\beta)$ assumes a separation of scales that may not exist in the inverse cascade. Stop trying to force the wavelet-filtered data into this model. Instead, analyze the *distribution of residence times* of tracers within coherent vortices (identified via $Q > Q_{threshold}$) versus their *flight times* in the strain-dominated regions.
+3. **Improve Non-Stationarity Interpretation:** You have confirmed $\alpha(t)$ is non-stationary. Rather than just fitting $\alpha$ to $k_{peak}$, perform a cross-correlation between the rate of change of energy at the largest scales ($dE(k_{min})/dt$) and the rate of change of $\alpha(t)$. This will provide a causal link between the spectral condensation and the evolution of anomalous diffusion.
+4. **Simplify:** Drop the wavelet-based re-advection task in the next iteration. It is computationally expensive and, as demonstrated, physically inconsistent with the emergence of Lévy flights. Focus the next iteration on the Lagrangian geometry of the flow (FTLE/Okubo-Weiss) to explain *why* $\alpha$ drifts, rather than just *that* it drifts.
+
+
+Respond in this format:
+
+\\begin{SUGGESTIONS}
+<SUGGESTIONS>
+\\end{SUGGESTIONS}
+
+In <SUGGESTIONS> put the suggestions to improve the plan.
+
+###### PROMPT ENDS ########
+
+###### RESPONSE [model: gemini-3.1-flash-lite] ########
+\begin{SUGGESTIONS}
+1. **Refine the Lagrangian Analysis:** The plan to use Okubo-Weiss ($Q$) and FTLE is excellent. To ensure robustness, define the "vortex" and "strain" regions using a dynamic thresholding approach (e.g., the 75th percentile of $|Q|$ calculated per snapshot) rather than a global constant, as the flow intensity changes significantly during the inverse cascade.
+2. **Clarify FTLE Integration:** Since you are using saved velocity snapshots at $\Delta t_{vel} = 2.0$, ensure the FTLE integration uses a sufficiently small internal time step (via linear interpolation between snapshots) to resolve the ridges accurately. Mention that the flow map $\Phi$ should be computed over a window $\Delta t_{FTLE} \approx 5-10 \times \Delta t_{vel}$ to capture the relevant manifold structures.
+3. **Statistical Significance of $\alpha(t)$:** Since you are using overlapping windows, the estimates of $\alpha(t)$ will be temporally correlated. When performing the ADF and KPSS tests, explicitly mention that you will account for this autocorrelation (e.g., by using Newey-West standard errors or by subsampling the windows) to avoid false positives for non-stationarity.
+4. **Data Management:** The plan is well-structured. Ensure that the `diagnostics.npy` file includes the instantaneous $Q_{threshold}$ and the count of hyperbolic points, as these are critical for the correlation analysis in Task 7.
+5. **Consistency Check:** The plan is now focused and avoids the pitfalls of the previous wavelet-based approach. No further suggestions are needed; the plan is sufficiently detailed and addresses the feedback effectively.
+\end{SUGGESTIONS}
+
