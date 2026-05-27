@@ -1,1 +1,1 @@
-{"N": 1024, "nu_h": 1e-19, "dt": 0.001, "status": "completed"}
+{"N": 1024, "nu_h": 1e-19, "epsilon_inj": 0.1, "T_prod": 500.0, "dt_snap": 0.05, "dt_vel": 2.0}

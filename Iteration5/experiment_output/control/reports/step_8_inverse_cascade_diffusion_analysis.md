@@ -1,3 +1,4 @@
+<!-- filename: reports/step_8_inverse_cascade_diffusion_analysis.md -->
 # Results: Scale-Dependent Anomalous Diffusion and Non-Stationary Lévy Flights in an Inverse Cascade
 
 ## 1. Data Quality and Inverse Cascade Validation

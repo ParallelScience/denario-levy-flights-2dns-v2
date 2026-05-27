@@ -1,60 +1,75 @@
-0. **DNS Implementation — MANDATORY ENGINEERING NOTES:**
+0. **DNS Implementation — CRITICAL: USE THE PROVIDED TEMPLATE EXACTLY**
 
-   Identical to Iteration 4 except for the forcing band. All implementation details (integrating factor method, empirical force_amp calibration, integer wavenumbers, GPU throughout) are unchanged.
+   A working, tested DNS solver is provided at:
+   `/home/node/work/projects/levy_flights_2dns_v2/dns_template_1024.py`
 
-   a. **Grid:** N = 1024. Domain L = 2π. dx = L/N.
-   b. **Forcing band:** k_force_min = 1, k_force_max = 3 (changed from [10,12]). This forces at the *largest* scales, which at 1024² gives maximum inertial range for the inverse cascade to develop.
-   c. **Hyperviscosity:** nu_h = 3.9e-31, p = 4 (same as Iteration 4).
-   d. **Integrating factor (IF):** MANDATORY — same implementation as Iteration 4.
-   e. **Force amplitude:** Calibrate empirically at startup (same procedure as Iteration 4). For k∈[1,3], n_force will be smaller (~5–10 modes), so force_amp will be larger. The calibration will handle this automatically.
-   f. **Spinup:** T_spinup = 20.0 (fixed time, not T/T_L condition).
-   g. **CFL:** dt = min(0.4 * dx / U_max, 0.5). Cold start: dt = 0.05.
-   h. **Snapshot intervals:** dt_snap = 0.01 (tracers), dt_vel = 0.5 (coarsen 1024→256 by AvgPool2d(4)).
-   i. **Tracers:** N_tracers = 5000, seeded uniformly at end of spinup.
-   j. **Output:** /home/node/work/projects/levy_flights_2dns_v2/data/ (overwrite).
-   k. **GPU:** ALL tensor operations on device='cuda'. Use torch.fft.rfft2/irfft2, torch.nn.functional.grid_sample for tracer interpolation.
-   l. **NaN/Inf guard:** Check after each step, raise RuntimeError if triggered.
-   m. **Verification:** After spinup print U_rms, T_L, k_peak. Require U_rms*dt_snap < 0.1.
-   n. **NO wavelet re-advection step** in this iteration — replaced by LCS/Okubo-Weiss analysis.
+   For Step 1 (DNS simulation), the engineer MUST:
+   1. Copy this file to `codebase/step_1.py`
+   2. Change only the production-run saving logic to write to the standard output paths
+   3. Run it as-is — DO NOT rewrite the solver, change the integrating factor method, add explicit viscosity, or use a different timestep scheme
 
-1. **DNS Execution and Inverse Cascade Development**:
-   - Execute the 2D Navier-Stokes solver on a $1024 \times 1024$ grid using the specified GPU-accelerated pseudo-spectral method.
-   - Force at $k \in [1, 3]$ with $\epsilon_{inj} = 0.1$. This maximises scale separation on a 1024² grid.
-   - Run spinup for T_spinup = 20.0, then seed tracers and run production for $T_{prod} = 50 \times T_L$.
-   - Save tracer positions at $\Delta t_{snap} = 0.01$ and coarsened (1024→256) Eulerian fields at $\Delta t_{vel} = 0.5$.
+   The template already implements:
+   - N=1024, domain L=2π, k_force_min=1, k_force_max=3, nu_h=3.9e-31, p=4
+   - Integrating factor (IF) method for hyperviscosity (unconditionally stable)
+   - Empirical force_amp calibration (correct rfft2 normalisation)
+   - CFL adaptive timestep, dt cap at 0.5
+   - Short production test (5 T_L) to verify snapshot quality
+   - Tracer advection using GPU grid_sample
 
-2. **Verification of Snapshot Quality**:
-   - Compute the mean tracer displacement $\langle|\Delta r|\rangle$ per snapshot; ensure it remains $< 0.3$ domain units.
-   - Calculate the VACF $C_{vv}(\tau)$ at short lags to confirm $\tau_{corr}$ is well-resolved.
-   - Verify the inverse cascade by plotting $E(k, t)$ at multiple intervals to confirm the drift of $k_{peak}$ from $k \approx 4$ toward $k \approx 1$.
+   Modifications needed to the template for the full production run:
+   - Replace the "SHORT PRODUCTION TEST" block with the full production run (T_prod = 50 * T_L_end)
+   - During production, save at dt_snap=0.01 (tracers) and dt_vel=0.5 (coarsened 1024→256 Eulerian fields)
+   - Save all output files to `/home/node/work/projects/levy_flights_2dns_v2/data/`:
+     * `tracer_positions.npy` — shape (N_snaps, 5000, 2)
+     * `tracer_velocities.npy` — shape (N_snaps, 5000, 2)
+     * `tracer_times.npy` — shape (N_snaps,)
+     * `velocity_snapshots.npy` — shape (N_vel_snaps, 2, 256, 256)
+     * `vorticity_snapshots.npy` — shape (N_vel_snaps, 256, 256)
+     * `vel_times.npy` — shape (N_vel_snaps,)
+     * `diagnostics.npy` — structured array with fields: time, E_total, U_rms, k_peak
+     * `sim_params.json` — dict with N, nu_h, epsilon_inj, T_L, T_prod, force_amp, dt_snap, dt_vel
+   - Coarsen Eulerian fields using `torch.nn.AvgPool2d(4)` before saving
+
+1. **DNS Execution (1024² with k∈[1,3])**:
+   - Copy `/home/node/work/projects/levy_flights_2dns_v2/dns_template_1024.py` to `codebase/step_1.py`
+   - Modify only the production loop to save full output (see Section 0)
+   - Run for T_prod = 50 × T_L. Expected: U_rms ≈ 0.5–2, T_L ≈ 3–15, T_prod ≈ 150–750 sim units
+
+2. **Data Quality and Cascade Validation**:
+   - Mean tracer displacement per snapshot < 0.3 × 2π ≈ 1.88 (must pass)
+   - VACF C_vv(τ=1) > 0.3 (must pass)
+   - Plot E(k,t) at t = 0.1, 0.3, 0.6, 1.0 × T_prod; confirm k_peak drifts toward k=1
 
 3. **Non-Stationary Lévy Analysis**:
-   - Divide the production run into overlapping temporal windows of width $W = 8 T_L$ with a step of $\Delta W = 2 T_L$.
-   - Estimate $\alpha(t)$ using the McCulloch quantile method and Hill estimator at lags $\tau = \{0.5, 1, 2\} T_L$.
-   - Perform ADF and KPSS tests to quantify non-stationarity, using Newey-West standard errors to account for temporal autocorrelation between overlapping windows.
+   - Overlapping windows W = 8 T_L, step ΔW = 2 T_L
+   - McCulloch quantile method: x and y displacements separately, median α across lags τ = {0.5, 1, 2} × T_L
+   - CCDF log-log plots per window; flag windows with < 1.5 decades as non-Lévy
+   - ADF and KPSS stationarity tests on α(t), γ(t), ν(t)
+   - Fit α = a + b × (k_peak/k_box)^c
 
 4. **Lagrangian Coherent Structure (LCS) Identification**:
-   - Compute the Okubo-Weiss parameter $Q = s^2 - \omega^2$ from Eulerian velocity snapshots.
-   - Define "vortex" and "strain" regions using a dynamic threshold $Q_{threshold}(t) = \pm \sigma_Q(t)$ (the instantaneous standard deviation of $Q$) to maintain physical consistency as the flow coarsens.
-   - Record $Q_{threshold}$ and the count of hyperbolic points in `diagnostics.npy`.
+   - Compute Okubo-Weiss parameter Q = s² − ω² from velocity snapshots (on GPU)
+   - Dynamic threshold Q_threshold(t) = σ_Q(t) (instantaneous std of Q)
+   - Classify each tracer at each time as "vortex-trapped" (local Q < −Q_threshold) or "strain-dominated" (Q > +Q_threshold) or "neutral"
+   - Compute α separately for the vortex-trapped and strain-dominated tracer populations
 
-5. **FTLE Field Computation**:
-   - Compute FTLE fields using a sliding window $\Delta t_{FTLE} \approx 2–4 \times T_L$.
-   - Integrate the flow map $\Phi$ using linear interpolation between velocity snapshots at $\Delta t_{vel} = 0.5$.
-   - Perform FTLE computation on GPU using PyTorch for speed.
-   - Use a vectorized approach or compute in chunks to ensure memory usage remains within the 128 GB RAM limit.
+5. **FTLE Field Computation** (GPU-accelerated):
+   - Integration time ΔT_FTLE = 2 × T_L
+   - Use bilinear interpolation (grid_sample) between velocity snapshots at dt_vel=0.5
+   - Compute FTLE on 256×256 grid (matching Eulerian snapshots)
 
-6. **Residence Time and Flight Time Distribution**:
-   - Categorize tracer segments as "trapped" ($Q > Q_{threshold}$) or "flight" ($Q < -Q_{threshold}$).
-   - Apply a minimum displacement threshold to "flight" segments to filter out small-scale jitter.
-   - Extract the probability distribution of residence and flight times; test for power-law consistency with $\alpha(t)$.
-   - Tag tracers exiting vortices via "vortex death" ($Q$ becoming positive) vs. "strain stripping" (proximity to hyperbolic points) to quantify the two-channel ejection hypothesis.
+6. **Residence Time and Flight Time Analysis**:
+   - Categorize tracer trajectory segments as "trapped" or "flight" based on Q classification
+   - Extract distributions of residence times and flight displacements
+   - Test for power-law tails; compare α from CCDF slope to McCulloch α(t)
+   - Distinguish "vortex death" vs "strain stripping" ejection events
 
 7. **Causal Link Analysis**:
-   - Perform a time-lagged cross-correlation and Granger Causality test between the rate of change of energy at the largest scales ($dE(k_{min})/dt$) and $d\alpha(t)/dt$.
-   - Evaluate the correlation between the spatial density of hyperbolic points and $\alpha(t)$ to determine if spectral condensation drives the evolution of Lagrangian geometry and, consequently, the Lévy index.
+   - Time-lagged cross-correlation between dE(k=1)/dt and dα(t)/dt
+   - Granger causality test (lag = 1–3 windows)
+   - Correlation between hyperbolic point spatial density and α(t)
 
-8. **Synthesis of Results**:
-   - Construct a 2D map of $\alpha$ as a function of hyperbolic point density and $k_{peak}/k_{box}$.
-   - Perform sensitivity analysis on the $Q_{threshold}$ (e.g., 70th vs 80th percentile) to ensure robustness of power-law exponents.
-   - Conclude whether the non-stationarity of $\alpha$ is a direct consequence of spectral condensation and the reorganization of the flow's Lagrangian coherent structures.
+8. **Synthesis**:
+   - 2D map of α vs (hyperbolic point density, k_peak/k_box)
+   - Sensitivity analysis on Q_threshold (70th vs 80th percentile)
+   - Conclude on whether non-stationarity of α is driven by spectral condensation + LCS reorganisation
