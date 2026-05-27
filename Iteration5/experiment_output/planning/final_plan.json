@@ -1,0 +1,130 @@
+{
+    "sub_tasks": [
+        {
+            "bullet_points": [
+                "Implement GPU-accelerated pseudo-spectral 2D NS solver in vorticity-streamfunction form on N=1024 grid using PyTorch (device='cuda'), with torch.fft.rfft2/irfft2",
+                "Use integrating factor (IF) method for hyperviscosity (nu_h=1e-19, p=4, 8th-order), RK4 time integration with adaptive CFL<0.4",
+                "Force stochastically at k∈[3,5] (NOT k∈[1,3]) with constant energy injection rate epsilon_inj=0.1; calibrate force_amp empirically at startup by measuring actual energy injection rate and rescaling",
+                "Run spinup with dynamic termination condition T/T_L >= 10: at each diagnostic step compute T_L = 2*pi/U_rms from current energy spectrum, check if elapsed_time/T_L >= 10, and stop spinup only when this condition is met; save diagnostics only during spinup",
+                "Print after spinup: actual T_spinup achieved, T_L at end of spinup, U_rms, k_peak",
+                "After spinup: seed N_tracers=5000 uniformly, run production for T_prod=50*T_L_spinup_end",
+                "Advect tracers using torch.nn.functional.grid_sample with align_corners=False and padding_mode='border'; reconstruct velocity field from spectral coefficients via irfft2 before each interpolation step; apply periodic wrapping to tracer positions after each step",
+                "Save tracer positions and velocities at dt_snap=0.05; save coarsened (1024→256 via AvgPool2d(4)) Eulerian velocity and vorticity at dt_vel=2.0",
+                "Compute azimuthally-averaged energy spectrum E(k,t) on the full 1024² spectral field (not the coarsened field) at every tracer snapshot; save to energy_spectrum.npy",
+                "Save diagnostics.npy as structured array with fields (time, E_total, E_rms, omega_rms, T_L, k_peak, d_vv_estimate) at every tracer snapshot; save sim_params.json",
+                "All output to /home/node/work/projects/levy_flights_2dns_v2/data/; NaN/Inf guard after each RK4 step; raise RuntimeError if triggered"
+            ],
+            "sub_task": "DNS simulation — 2D Navier-Stokes solver with tracer advection",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load tracer_positions.npy, tracer_velocities.npy, tracer_times.npy, energy_spectrum.npy, diagnostics.npy from the data directory",
+                "Print the actual number of tracer snapshots saved (N_tracer_snaps) and the actual T_prod achieved",
+                "Compute mean tracer displacement per snapshot step using periodic wrapping (differences mod 2pi); report whether it is below 0.3 domain units (threshold = 0.3×2π ≈ 1.885); if exceeded, print a clear WARNING message",
+                "Compute VACF C_vv(tau) normalized by C_vv(0), averaged over all tracers and both velocity components, at lags tau = 1,2,4,8,16 steps; report C_vv(1) and the decorrelation time tau_corr (first lag where C_vv drops below 1/e); print all values",
+                "Plot E(k) at t = 0.1, 0.3, 0.6, 1.0 × T_prod on a log-log plot to confirm k_peak drifts from ~4 toward ~1-2; annotate k_peak at each time",
+                "Plot mean displacement per step and VACF vs lag in a multi-panel figure; save all plots as high-resolution PNG",
+                "Save verification statistics (mean displacement, C_vv values at all lags, tau_corr, N_tracer_snaps, T_prod_actual) to a json file for use in later steps"
+            ],
+            "sub_task": "Snapshot quality verification and inverse cascade confirmation",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load tracer positions/velocities, tracer_times, diagnostics from data directory; load T_L from sim_params.json",
+                "Define overlapping windows of width W=8*T_L, step dW=2*T_L over the production run; compute window center times",
+                "For each window: compute displacement increments at lags tau={0.5,1,2}*T_L using periodic wrapping (mod 2pi) to avoid spurious large jumps from domain boundary crossings",
+                "Apply McCulloch quantile method: compute p5,p25,p50,p75,p95 quantiles of displacement increments; compute nu_alpha = (q95-q5)/(q75-q25); interpolate from McCulloch (1986) table to get alpha; set alpha=NaN if fewer than 500 displacement samples are available for that window-lag combination",
+                "Apply Hill estimator as cross-check: compute on absolute values of displacement increments; use k_Hill = floor(sqrt(N_samples)) order statistics; clip result to [0.5, 2.0]; set to NaN if N_samples < 500",
+                "For each window: fit MSD(tau) power law (log-log linear regression) to get gamma(t); fit VACF algebraic decay (log-log linear regression) to get nu(t); extract d_vv(t) and k_peak(t) as window-averaged values from diagnostics",
+                "Perform ADF and KPSS stationarity tests on the alpha_McCulloch(t) time series (excluding NaN entries); print test statistics and p-values",
+                "Fit alpha vs k_peak(t)/k_box with the model alpha = a + b*(k_peak/k_box)^c using nonlinear least squares; print fitted parameters and R²",
+                "Save all window statistics (alpha_McCulloch, alpha_Hill, gamma, nu, d_vv, k_peak, window_centers) to a npz file"
+            ],
+            "sub_task": "Non-stationarity analysis — α(t), γ(t), ν(t), k_peak(t) over overlapping windows",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load window statistics npz file saved in Step 3",
+                "Plot alpha(t) for both McCulloch and Hill estimators with shaded error bands vs window center time; overlay k_peak(t)/k_box on a secondary y-axis; annotate ADF and KPSS p-values as text on the plot",
+                "Plot gamma(t) and nu(t) vs window center time in separate panels within the same figure",
+                "Plot alpha vs k_peak/k_box scatter with the fitted curve alpha = a + b*(k_peak/k_box)^c overlaid; annotate fitted parameters and R²",
+                "Save all figures as high-resolution PNG files to the data directory"
+            ],
+            "sub_task": "Plot non-stationarity results",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load velocity_snapshots.npy (shape: N_vel_snaps, 2, 256, 256), vel_times.npy, and tracer_positions.npy from data directory; extract initial tracer positions (first snapshot) as seeds",
+                "Apply 2D DWT (PyWavelets, wavelet='db6', mode='periodization') decomposition up to J=6 levels to each velocity snapshot; extract detail coefficients D_j={H,V,D} at each level j=1..6",
+                "For each scale j=1..6: compute wavelet energy E_j(x,y,t) = sum_d |D_j^d(x,y,t)|^2 at each snapshot; compute temporal autocorrelation C_E(tau,j) averaged over all spatial positions; integrate C_E trapezoidal until it drops below 0.1 to get T_eddy(j); print T_eddy values for all j",
+                "For each j_min in {1,2,3,4}: reconstruct filtered velocity field u_tilde_j on-the-fly (one j_min at a time, do not save all filtered fields to disk simultaneously) by zeroing detail coefficients below j_min and applying inverse DWT; keep only the current filtered field in memory",
+                "Re-advect tracers in each filtered field: linearly interpolate filtered velocities in time between consecutive Eulerian snapshots (at dt_vel=2.0) during RK4 sub-steps; use dt_sub=0.05 for RK4 integration; interpolate spatially using bilinear interpolation on the 256² grid; apply periodic wrapping; record tracer trajectories",
+                "For each filtered field j_min: compute alpha(j_min) via McCulloch method on displacement increments (min 500 samples, periodic wrapping), gamma_MSD(j_min) from MSD power law, nu_VACF(j_min) from VACF decay",
+                "Save T_eddy(j) for j=1..6, and alpha(j_min), gamma_MSD(j_min), nu_VACF(j_min) for j_min=1..4 to a npz file"
+            ],
+            "sub_task": "Wavelet decomposition, eddy-lifetime estimation, and filtered tracer re-advection",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load wavelet results npz (T_eddy, alpha, gamma_MSD, nu_VACF per scale j) and non-stationarity results npz (alpha_McCulloch, alpha_Hill, k_peak, window_centers) from previous steps",
+                "Plot alpha(j_min) vs T_eddy(j_min) with power-law fit on log-log axes; annotate the CTRW prediction alpha=1+beta/(2-beta) with beta proportional to T_eddy^delta; report fitted delta value on the plot",
+                "Plot gamma_MSD(j_min) and nu_VACF(j_min) vs j_min (wavelet scale level) in separate panels",
+                "Construct 2D heatmap of alpha as function of (T_eddy axis from wavelet results, k_peak/k_box axis from non-stationarity results) by combining both datasets; use interpolation to fill the grid",
+                "Compare alpha(t) from Step 3 with alpha(j_peak(t)) from wavelet results at the dominant wavelet scale j corresponding to k_peak(t) at each time window; plot both time series on the same axes",
+                "Save all figures as high-resolution PNG files; save synthesis statistics (fitted delta, CTRW test results) to a npz file"
+            ],
+            "sub_task": "Plot wavelet scaling results and synthesis",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load velocity_snapshots.npy (shape: N_vel_snaps, 2, 256, 256), vorticity_snapshots.npy, vel_times.npy, and tracer_positions.npy from data directory; load alpha_McCulloch and window_centers from Step 3 npz",
+                "Compute velocity gradients spectrally: apply 2D FFT to each 256² velocity snapshot, multiply by i*kx and i*ky wavenumber arrays, apply inverse FFT to get du/dx, du/dy, dv/dx, dv/dy; compute strain rate s^2 = (du/dx - dv/dy)^2 + (du/dy + dv/dx)^2 and vorticity squared omega^2 = (dv/dx - du/dy)^2; compute Q = s^2 - omega^2",
+                "Use dynamic threshold Q_threshold(t) = sigma_Q(t) (instantaneous std of Q field) at each snapshot; count hyperbolic points (Q > Q_threshold) and elliptic points (Q < -Q_threshold); record counts in time series",
+                "For each tracer at each snapshot: interpolate Q at tracer position; classify as trapped (Q < -Q_threshold) or flight (Q > Q_threshold); extract contiguous trapped and flight segments; compute residence time and flight time distributions",
+                "Tag tracers exiting vortices: classify exit as vortex death (Q at tracer position transitions from negative to positive due to vortex dissipation) vs strain stripping (tracer exits near a hyperbolic point where Q > Q_threshold in the neighborhood)",
+                "Compute time-lagged cross-correlation between dE(k_min)/dt and d_alpha/dt (finite differences of alpha_McCulloch); report peak lag and correlation coefficient; perform Granger causality test (both directions, lag order 2) using statsmodels",
+                "Evaluate Pearson correlation between hyperbolic point density time series and alpha_McCulloch(t) (interpolated to matching times); print correlation coefficient and p-value",
+                "Save all results (Q_time_series, hyperbolic_counts, elliptic_counts, residence_times, flight_times, vortex_death_fraction, strain_stripping_fraction, cross_correlation, granger_results, pearson_r) to a npz file"
+            ],
+            "sub_task": "Okubo-Weiss and LCS analysis",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Load LCS statistics npz from Step 7 and alpha_McCulloch from Step 3 npz",
+                "Plot residence time and flight time distributions on log-log axes; fit power laws to the tails; annotate fitted exponents",
+                "Plot hyperbolic point density vs time overlaid with alpha(t) on a dual-axis plot",
+                "Plot cross-correlation function between dE(k_min)/dt and d_alpha/dt vs lag; annotate peak lag and peak correlation coefficient",
+                "Plot Granger causality F-statistics and p-values for both directions (dE→dalpha and dalpha→dE) as a bar chart",
+                "Plot a 2D snapshot of the Okubo-Weiss Q field at a representative mid-production time with tracer positions overlaid, colored by trapped (blue) vs flight (red) status",
+                "Save all figures as high-resolution PNG files to the data directory"
+            ],
+            "sub_task": "Plot LCS, Okubo-Weiss, and causal analysis results",
+            "sub_task_agent": "engineer"
+        },
+        {
+            "bullet_points": [
+                "Synthesize all quantitative results from Steps 2-8 using the console outputs and saved statistics; cross-reference numerical values printed by each engineer step",
+                "Report snapshot quality metrics: mean displacement per step, C_vv(1), tau_corr, N_tracer_snaps, T_prod_actual; confirm whether the displacement threshold was met",
+                "Report inverse cascade confirmation: describe k_peak drift from ~4 toward lower wavenumbers across the production run",
+                "Report non-stationarity results: alpha_McCulloch(t) and alpha_Hill(t) time series with uncertainty; flag any windows where McCulloch and Hill estimates differ by more than 0.3 and discuss estimator sensitivity; report ADF and KPSS test statistics and p-values; report fitted parameters of alpha = a + b*(k_peak/k_box)^c with R²",
+                "Report wavelet eddy-lifetime scaling: T_eddy(j) for all j, alpha(j_min) for all j_min, fitted power-law exponent delta in beta proportional to T_eddy^delta; state whether CTRW prediction alpha=1+beta/(2-beta) is supported",
+                "Report LCS/Okubo-Weiss statistics: vortex death fraction vs strain stripping fraction; residence time and flight time power-law exponents; hyperbolic point density correlation with alpha(t)",
+                "Report causal analysis: peak lag and correlation coefficient of cross-correlation between dE(k_min)/dt and d_alpha/dt; Granger causality F-statistics and p-values for both directions",
+                "State units for all reported physical quantities (T_eddy in simulation time units, k_peak in units of k_box=1, alpha dimensionless)",
+                "Compare final alpha values against prior result alpha ≈ 1.4 from v1 Iteration 4; discuss whether alpha is stationary or non-stationary and whether spectral condensation drives the evolution of Lagrangian geometry",
+                "Structure the Results section with subsections: (1) Simulation Quality and Inverse Cascade, (2) Non-Stationary Lévy Analysis, (3) Wavelet Eddy-Lifetime Scaling, (4) LCS and Okubo-Weiss Analysis, (5) Causal"
+            ],
+            "sub_task": "Write full Results section of the paper",
+            "sub_task_agent": "researcher"
+        }
+    ]
+}
