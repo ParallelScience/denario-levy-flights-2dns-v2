@@ -1,0 +1,12 @@
+--- Stationarity Tests for Alpha ---
+ADF Statistic: -3.256, p-value: 0.017. Result: Stationary (reject H0)
+KPSS Statistic: 0.086, p-value: 0.100. Result: Stationary (fail to reject H0)
+
+--- Stationarity Tests for Gamma ---
+ADF Statistic: -1.366, p-value: 0.598. Result: Non-Stationary (fail to reject H0)
+KPSS Statistic: 0.186, p-value: 0.100. Result: Stationary (fail to reject H0)
+
+--- Stationarity Tests for Nu ---
+ADF Statistic: -2.329, p-value: 0.163. Result: Non-Stationary (fail to reject H0)
+KPSS Statistic: 0.174, p-value: 0.100. Result: Stationary (fail to reject H0)
+
