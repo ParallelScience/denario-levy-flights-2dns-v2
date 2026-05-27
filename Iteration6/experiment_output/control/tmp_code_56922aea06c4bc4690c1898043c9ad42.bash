@@ -1,0 +1,1 @@
+python3 -c "import numpy as np; d = np.load('/home/node/work/projects/levy_flights_2dns_v2/data/diagnostics.npy'); print('Diagnostics shape:', d.shape); print('Diagnostics content (first 5):', d[:5])"

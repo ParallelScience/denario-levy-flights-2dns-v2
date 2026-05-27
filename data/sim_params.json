@@ -1,1 +1,1 @@
-{"N": 1024, "nu_h": 1e-19, "epsilon_inj": 0.1, "T_prod": 500.0, "dt_snap": 0.05, "dt_vel": 2.0}
+{"N": 1024, "nu_h": 3.9e-31, "lambda_ekman": 0.5}

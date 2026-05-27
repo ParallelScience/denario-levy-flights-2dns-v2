@@ -1,0 +1,116 @@
+{
+    "sub_tasks": [
+        {
+            "bullet_points": [
+                "Copy /home/node/work/projects/levy_flights_2dns_v2/dns_template_1024_ekman.py to codebase/step_1.py verbatim, then read and understand the existing production loop structure before making any modifications",
+                "Preserve ALL existing spinup logic, RK4 integrator, spectral dealiasing, and forcing calibration code verbatim — only append output-saving code to the production loop, do not restructure it",
+                "Keep all solver parameters from the template (N=1024, k_force=[20,40], lambda_ekman=0.5, nu_h=3.9e-31, T_spinup=60, dt_snap=0.02); ALL tensor operations must remain on device='cuda'",
+                "After spinup completes, measure and print actual U_rms, T_L, k_peak; record the actual T_L in sim_params.json (not a hardcoded value)",
+                "During production loop: coarsen 1024→256 velocity and vorticity using torch.nn.functional.avg_pool2d with kernel_size=4 on GPU before CPU transfer; compute azimuthally-averaged energy spectrum using integer wavenumber bins k=1 to N//2 at every tracer snapshot time",
+                "Save diagnostics.npy as numpy structured array with named fields: time, E_total, E_rms, omega_rms, T_L, k_peak, d_vv_estimate",
+                "Save all required files to /home/node/work/projects/levy_flights_2dns_v2/data/: tracer_positions.npy, tracer_velocities.npy, tracer_times.npy, velocity_snapshots.npy, vorticity_snapshots.npy, vel_times.npy, energy_spectrum.npy, diagnostics.npy, sim_params.json",
+                "Print U_rms, T_L, k_peak after spinup and every 10 T_L during production"
+            ],
+            "sub_task": "Run the 2D turbulence DNS simulation with passive tracer advection",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 7200
+        },
+        {
+            "bullet_points": [
+                "Load tracer_positions.npy, tracer_velocities.npy, tracer_times.npy, energy_spectrum.npy, diagnostics.npy from the data directory",
+                "Compute mean tracer displacement per snapshot step using position differences; check it is < 0.3 × 2π ≈ 1.88; print result and flag if violated",
+                "Compute VACF C_vv(τ) using the tracer_velocities array (not finite differences), normalizing by C_vv(0) = mean squared velocity, at lags τ = 1, 2, 4, 8, 16 steps; report C_vv(τ=1); define τ_corr as first lag where C_vv drops below 1/e and print it in both simulation time units and units of T_L",
+                "Plot E(k) at t = 0.1, 0.3, 0.6, 1.0 × T_prod on a single figure with 4 subplots (log-log scale), showing k_peak drift from forcing scale toward large scales",
+                "Plot k_peak(t) vs time to visualize inverse cascade progression",
+                "Save all plots to the data directory"
+            ],
+            "sub_task": "Verify snapshot quality and confirm inverse cascade development",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 600
+        },
+        {
+            "bullet_points": [
+                "Load tracer_positions.npy, tracer_velocities.npy, tracer_times.npy, diagnostics.npy",
+                "Define overlapping windows of width W = 8 T_L, step ΔW = 2 T_L; if fewer than 3 windows can be constructed, print a warning and proceed with available windows rather than failing",
+                "For each window: apply McCulloch quantile method to scalar displacement magnitudes |Δr(τ)| (not vector components) at lags τ = {0.5, 1, 2} T_L using quantiles p5, p25, p50, p75, p95; compute Hill estimator using top k = max(50, N//10) order statistics and print the threshold k alongside each estimate",
+                "For each window: fit MSD(τ) power law over lag range τ ∈ [1, W/4] steps using log-log linear regression (numpy polyfit); print R² for each window",
+                "For each window: fit VACF algebraic decay using only lags where C_vv > 0.05 to avoid noise; use log-log linear regression; print R² for each window",
+                "Extract d_vv(t) and k_peak(t) from diagnostics averaged within each window",
+                "Run ADF and KPSS stationarity tests on α(t) and γ(t) time series; print all test statistics and p-values",
+                "Save all window-level results (α_McCulloch, α_Hill, γ, ν, d_vv, k_peak, window center times) to npz file"
+            ],
+            "sub_task": "Compute α(t), γ(t), ν(t), d_vv(t), k_peak(t) in overlapping temporal windows",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 1800
+        },
+        {
+            "bullet_points": [
+                "Load the window-level results saved in Step 3",
+                "Plot α(t) and γ(t) vs time with McCulloch and Hill α on same panel, showing temporal evolution",
+                "Plot ν(t), d_vv(t), k_peak(t) vs time in a multi-panel figure",
+                "Plot α(t) vs k_peak(t)/k_box (k_box=1) and fit α = a + b × (k_peak/k_box)^c; show fit on plot and print fitted parameters a, b, c with uncertainties",
+                "Save all plots to the data directory"
+            ],
+            "sub_task": "Plot non-stationarity results and α vs k_peak relationship",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 300
+        },
+        {
+            "bullet_points": [
+                "Load velocity_snapshots.npy (shape N_vel, 2, 256, 256), vel_times.npy, tracer_positions.npy, tracer_times.npy from the data directory",
+                "Define 5 Gaussian band-pass filters on the 256×256 grid: (k0=25,σ=5), (k0=15,σ=4), (k0=8,σ=3), (k0=4,σ=2), (k0=2,σ=1); compute wavenumber magnitudes |k| correctly for rfft2 output shape (256, 129) accounting for the asymmetric frequency grid",
+                "For each band: check if band energy < 1% of total energy — if so, flag and skip the band",
+                "For each band: apply rfft2 on GPU, multiply by G(k)=exp(-(|k|-k0)²/(2σ²)), irfft2 to get filtered velocity fields",
+                "For each band: compute T_eddy(j) from temporal autocorrelation of band energy, integrating until C_E drops below 0.1",
+                "Re-advect the first 2000 tracers from tracer_positions.npy at the first available snapshot time as initial conditions; use RK4 integration with linear temporal interpolation between consecutive velocity snapshots and GPU grid_sample interpolation",
+                "For each band: compute MSD exponent γ(j) and VACF decay ν(j); estimate CCDF slope by fitting power law to upper tail (top 20% of displacement magnitudes) using log-log linear regression; print fitted slope and standard error from polyfit",
+                "Save all band results (T_eddy, α/γ/ν per band, CCDF slopes and uncertainties) to npz file; print all numerical results per band"
+            ],
+            "sub_task": "Filter velocity fields into Gaussian spectral bands and re-advect tracers",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 3600
+        },
+        {
+            "bullet_points": [
+                "Load band results from Step 5",
+                "Plot α(j) (CCDF slope proxy) vs T_eddy(j) for all valid bands; fit power-law or linear relationship",
+                "Plot γ(j) vs T_eddy(j) for all valid bands",
+                "Test CTRW prediction: compute β(j) from α(j) via β = 2(α−1)/α; flag and exclude β values outside [0, 1] as unphysical; fit β ∝ T_eddy^δ in log-log space using numpy polyfit; print δ and its standard error explicitly",
+                "Plot β(j) vs T_eddy(j) with the power-law fit",
+                "Plot CCDF of displacement magnitudes for each valid band on a single log-log figure",
+                "Save all plots to the data directory"
+            ],
+            "sub_task": "Plot band-pass wavelet results and test CTRW scaling prediction",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 300
+        },
+        {
+            "bullet_points": [
+                "Load window-level results from Step 3 and band results from Step 5",
+                "For each temporal window, identify dominant wavelet band j_peak(t) as the band whose k0 is closest to k_peak(t)",
+                "Compare α(t) from Step 3 with α(j_peak(t)) from Step 5: compute both Pearson and Spearman rank correlation coefficients with p-values; print all correlation statistics",
+                "Build a 2D map of α as function of (T_eddy, k_peak/k_box) using scipy.interpolate.griddata with method='linear'; print interpolated grid bounds and resolution",
+                "Save synthesis results (comparison arrays, 2D map data) to npz file",
+                "Plot α(t) from temporal windows vs α(j_peak(t)) from wavelet bands as scatter plot with 1:1 line",
+                "Plot the 2D interpolated map of α as function of (T_eddy, k_peak/k_box) as color-coded contour plot",
+                "Plot α(t) overlaid with k_peak(t)/k_box on dual-axis time series",
+                "Save all plots to the data directory"
+            ],
+            "sub_task": "Compare temporal α(t) with band α(j), build 2D map, and generate synthesis plots",
+            "sub_task_agent": "engineer",
+            "code_execution_timeout": 300
+        },
+        {
+            "bullet_points": [
+                "Summarize all quantitative results from Steps 2–7: displacement quality check values, VACF decorrelation time in simulation units and T_L units, inverse cascade k_peak drift, stationarity test statistics and p-values (ADF and KPSS), α(t)/γ(t)/ν(t) temporal evolution, fitted parameters a, b, c from α vs k_peak fit, band-pass T_eddy values per band, CTRW scaling exponent δ with standard error, Pearson and Spearman correlations from synthesis with p-values",
+                "Interpret the physical meaning of each result in the context of Lévy flight theory, CTRW, and 2D turbulence inverse cascade",
+                "Explicitly state whether α ≈ 1.4 from v1 is stationary or drifts, and what drives the drift",
+                "Explicitly discuss the CTRW prediction α = 1 + β/(2−β) and whether it holds across wavelet bands, including any cases where predictions were not confirmed with alternative interpretations",
+                "Reference all plots generated in previous steps by description",
+                "Write in academic paper style with full quantitative detail"
+            ],
+            "sub_task": "Write the full Results section of the paper",
+            "sub_task_agent": "researcher"
+        }
+    ]
+}
